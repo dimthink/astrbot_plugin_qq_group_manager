@@ -93,3 +93,37 @@ def test_kv_failure_keeps_dirty_and_does_not_raise():
     kv.fail_keys.add(KEY_SETTINGS)
     run(store.update_settings({"dry_run": False}))
     assert store.dry_run() is False
+
+
+def test_prompt_and_flood_settings_are_editable():
+    """WebUI 策略页会写入提示词与刷屏阈值，必须能被 normalize 保留（回归）。"""
+    from src.store import normalize_settings
+
+    settings = normalize_settings(
+        {"prompt_system": "自定义", "prompt_user": "模板", "flood_threshold": 3}
+    )
+    assert settings["prompt_system"] == "自定义"
+    assert settings["prompt_user"] == "模板"
+    assert settings["flood_threshold"] == 3
+    # 越界值被钳制、类型错误回退默认
+    assert normalize_settings({"flood_threshold": 999})["flood_threshold"] == 100
+    assert normalize_settings({"flood_threshold": "x"})["flood_threshold"] == 8
+
+
+def test_prompt_settings_roundtrip_through_store():
+    import asyncio
+
+    from src.store import PluginStore
+    from tests.fakes import FakeKV
+
+    async def scenario():
+        store = PluginStore(FakeKV())
+        await store.load()
+        updated = await store.update_settings(
+            {"prompt_system": "你是审核员", "prompt_user": "内容：{text}", "flood_threshold": 5}
+        )
+        assert updated["prompt_system"] == "你是审核员"
+        assert updated["prompt_user"] == "内容：{text}"
+        assert updated["flood_threshold"] == 5
+
+    asyncio.run(scenario())

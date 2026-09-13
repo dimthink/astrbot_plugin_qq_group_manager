@@ -331,6 +331,9 @@ def default_settings() -> dict[str, Any]:
         "store_text": False,
         "audit_queue_maxsize": 5000,
         "group_rules_brief": "",
+        "prompt_system": "",
+        "prompt_user": "",
+        "flood_threshold": 8,
         "probe_full_msg_interval": 1800,
         "capability_log_dedupe_window": 1800,
     }
@@ -354,6 +357,7 @@ NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
     "retention_capability_days": (1, 365),
     "retention_join_days": (1, 365),
     "audit_queue_maxsize": (100, 100_000),
+    "flood_threshold": (0, 100),
     "probe_full_msg_interval": (300, 86400),
     "capability_log_dedupe_window": (0, 86400),
 }

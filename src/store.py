@@ -64,12 +64,16 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     settings = default_settings()
     if isinstance(raw, dict):
         settings.update({k: v for k, v in raw.items() if k in settings})
+    defaults = default_settings()
     for key, (minimum, maximum) in NUMERIC_BOUNDS.items():
+        # 兜底值一律取内置默认值：用户可以传入任意脏数据（WebUI 手填、旧配置、
+        # 非法字符串），原先用 int(当前值) 兜底会直接抛 ValueError 导致保存失败。
+        fallback = defaults.get(key, settings.get(key))
         current = settings.get(key)
-        if isinstance(current, bool) or (isinstance(minimum, int) and isinstance(maximum, int)):
-            settings[key] = clamp_int(current, int(settings[key]), int(minimum), int(maximum))
+        if isinstance(fallback, int) and not isinstance(fallback, bool):
+            settings[key] = clamp_int(current, int(fallback), int(minimum), int(maximum))
         else:
-            settings[key] = clamp_float(current, float(settings[key]), minimum, maximum)
+            settings[key] = clamp_float(current, float(fallback), minimum, maximum)
     for key in (
         "enabled",
         "dry_run",
@@ -96,7 +100,13 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         settings["mute_steps"] = {"3": 600, "4": 3600, "5": 86400}
     if not isinstance(settings.get("action_matrix"), dict):
         settings["action_matrix"] = default_settings()["action_matrix"]
-    for key in ("notify_session", "db_path", "group_rules_brief"):
+    for key in (
+        "notify_session",
+        "db_path",
+        "group_rules_brief",
+        "prompt_system",
+        "prompt_user",
+    ):
         settings[key] = str(settings.get(key) or "")
     return settings
 
