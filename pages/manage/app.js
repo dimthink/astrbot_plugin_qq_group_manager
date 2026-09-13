@@ -948,7 +948,7 @@ async function viewPolicy(root) {
     try {
       await bridge.apiPost('config', { section: 'settings', data: payload });
       state.config = null;
-      toast('策略已保存', 'ok');
+      toast('策略已保存（送审条件：' + (payload.send_conditions.join('、') || '无') + '）', 'ok');
       await render();
     } catch (error) {
       toast('保存失败：' + error.message, 'bad');

@@ -89,6 +89,9 @@ RISK_CONDITION_PREFIX = "risk>="
 SEND_CONDITIONS: tuple[str, ...] = (
     "rule_hit",
     "has_link",
+    "has_contact",
+    "ad_template",
+    "has_image",
     "long_text",
     "new_member",
     "flood",
