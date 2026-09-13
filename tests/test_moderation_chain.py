@@ -450,3 +450,141 @@ def test_handler_summary_reports_planned_and_skipped(tmp_path):
         await chain.close()
 
     asyncio.run(scenario())
+
+
+def test_extract_text_collects_images():
+    """图文混排要能同时拿到文本与图片 URL（图片是否送审由配置决定）。"""
+    from types import SimpleNamespace
+
+    main = load_main()
+
+    class Image:
+        def __init__(self, url):
+            self.url = url
+            self.file = ""
+
+    event = SimpleNamespace(
+        message_str="看这个 https://example.com/abc",
+        message_obj=SimpleNamespace(
+            raw_message=SimpleNamespace(
+                attachments=[{"content_type": "image/png", "url": "https://cdn.example.com/a.png"}],
+                id="m1",
+            )
+        ),
+        get_messages=lambda: [Image("https://cdn.example.com/a.png")],
+    )
+    text, kind, images = main.QQGroupManager._extract_text(event)
+    assert "example.com/abc" in text
+    assert images == ["https://cdn.example.com/a.png"]
+    assert kind == "图文"
+
+    # 纯图片（无组件 URL）也不应报错
+    event2 = SimpleNamespace(
+        message_str="",
+        message_obj=SimpleNamespace(raw_message=SimpleNamespace(attachments=[], id="m2")),
+    )
+    text2, kind2, images2 = main.QQGroupManager._extract_text(event2)
+    assert text2 == "" and images2 == [] and kind2 == "文本"
+
+
+def test_pure_image_message_review_modes(tmp_path):
+    """image_review=off 时纯图片不送审；always 时会把图片交给 LLM。"""
+
+    async def scenario():
+        chain = await run_chain(tmp_path, text="", llm_response=LLM_VIOLATION, mode="standard")
+        service = chain.service
+        main = load_main()
+
+        class Image:
+            url = "https://cdn.example.com/a.png"
+            file = ""
+
+        class ImageEvent(FakeEvent):
+            def __init__(self):
+                super().__init__("")
+                self.message_obj.raw_message.attachments = [
+                    {"content_type": "image/png", "url": "https://cdn.example.com/a.png"}
+                ]
+
+            def get_messages(self):
+                return [Image()]
+
+        seen: list[list[str]] = []
+
+        async def provider_call(request, system_prompt, user_prompt):
+            seen.append(list(request.image_urls))
+            assert "图片" in user_prompt or "图片" in system_prompt
+            return LLM_VIOLATION
+
+        service.moderator.provider_call = provider_call
+        await service.store.update_settings({"image_review": "off"})
+        await main.QQGroupManager._moderate(
+            service,
+            ImageEvent(),
+            group_id="g1",
+            config=service.store.group("g1"),
+            sender_openid="u1",
+            sender_name="小号",
+            sender_role="member",
+        )
+        assert seen == [], "image_review=off 时不应送审图片"
+
+        await service.store.update_settings({"image_review": "always"})
+        service._seen_messages.clear()
+        await main.QQGroupManager._moderate(
+            service,
+            ImageEvent(),
+            group_id="g1",
+            config=service.store.group("g1"),
+            sender_openid="u1",
+            sender_name="小号",
+            sender_role="member",
+        )
+        assert seen == [["https://cdn.example.com/a.png"]], "image_review=always 应把图片交给 LLM"
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_with_text_mode_skips_pure_image(tmp_path):
+    async def scenario():
+        chain = await run_chain(tmp_path, mode="standard")
+        service = chain.service
+        main = load_main()
+        await service.store.update_settings({"image_review": "with_text"})
+        seen: list[list[str]] = []
+
+        async def provider_call(request, system_prompt, user_prompt):
+            del system_prompt, user_prompt
+            seen.append(list(request.image_urls))
+            return LLM_VIOLATION
+
+        service.moderator.provider_call = provider_call
+
+        class Image:
+            url = "https://cdn.example.com/a.png"
+            file = ""
+
+        class PureImageEvent(FakeEvent):
+            def __init__(self):
+                super().__init__("")
+                self.message_obj.raw_message.attachments = [
+                    {"content_type": "image/png", "url": "https://cdn.example.com/a.png"}
+                ]
+
+            def get_messages(self):
+                return [Image()]
+
+        await main.QQGroupManager._moderate(
+            service,
+            PureImageEvent(),
+            group_id="g1",
+            config=service.store.group("g1"),
+            sender_openid="u1",
+            sender_name="小号",
+            sender_role="member",
+        )
+        assert seen == [], "with_text 模式下纯图片消息不送审"
+        await chain.close()
+
+    asyncio.run(scenario())

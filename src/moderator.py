@@ -85,6 +85,7 @@ class ModerationRequest:
     days_in_group: int | None = None
     umo: str = ""
     message_id: str = ""
+    image_urls: list[str] = field(default_factory=list)
 
     def render_user_prompt(self, template: str) -> str:
         """按模板渲染用户提示词（占位符缺失时保持原样）。"""
@@ -97,10 +98,16 @@ class ModerationRequest:
             "days": "-" if self.days_in_group is None else self.days_in_group,
             "recent": self.recent_messages,
             "text": truncate(self.text, 1500),
+            "image_count": len(self.image_urls),
         }
         rendered = template
         for key, value in values.items():
             rendered = rendered.replace("{" + key + "}", str(value))
+        if self.image_urls:
+            rendered += (
+                "\n【图片】本条消息附带 " + str(len(self.image_urls)) + " 张图片，"
+                "请结合图片内容（文字截图、二维码、图片广告、违规画面等）一起判断。"
+            )
         return rendered
 
 
@@ -338,7 +345,10 @@ class LLMModerator:
             self.stats.skipped_by_budget += 1
             return Verdict.review("已达当日 LLM 调用预算", source="llm")
 
-        cache_key = digest_text(f"{request.text}|{request.sender_role}")
+        cache_key = digest_text(
+            f"{request.text}|{request.sender_role}|{len(request.image_urls)}|"
+            + "|".join(request.image_urls[:2])
+        )
         cached = self._cache_get(cache_key)
         if cached is not None:
             self.stats.cache_hits += 1
@@ -349,6 +359,11 @@ class LLMModerator:
         system_prompt = str(templates.get("system") or "").strip() or SYSTEM_PROMPT_DEFAULT
         user_template = str(templates.get("user") or "").strip() or USER_TEMPLATE_DEFAULT
         user_prompt = request.render_user_prompt(user_template)
+        if request.image_urls:
+            system_prompt += (
+                "\n- 本条消息附带图片：请结合图片内容判断，图片中的文字、二维码、联系方式、"
+                "广告版式与违规画面同样属于审核范围"
+            )
 
         started = self._clock()
         self.stats.calls += 1

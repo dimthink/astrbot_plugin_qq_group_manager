@@ -12,6 +12,7 @@ import copy
 from typing import Any, Protocol, runtime_checkable
 
 from .models import (
+    IMAGE_REVIEW_MODES,
     JOIN_REVIEW_MODES,
     MODERATION_MODES,
     NUMERIC_BOUNDS,
@@ -91,6 +92,8 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         settings[key] = bool(settings.get(key))
     if settings.get("mode") not in MODERATION_MODES:
         settings["mode"] = "lenient"
+    if settings.get("image_review") not in IMAGE_REVIEW_MODES:
+        settings["image_review"] = "off"
     if settings.get("join_review_mode") not in JOIN_REVIEW_MODES:
         settings["join_review_mode"] = "off"
     conditions = settings.get("send_conditions")

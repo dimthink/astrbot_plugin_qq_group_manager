@@ -785,6 +785,20 @@ async function viewPolicy(root) {
   (options.modes || []).forEach((mode) => {
     modeSelect.appendChild(el('option', { value: mode, text: mode, selected: mode === settings.mode ? 'selected' : null }));
   });
+  const imageReview = el('select');
+  [['off', '图片不送审（默认）'], ['with_text', '仅图文混排时把图一起送审'], ['always', '纯图片也送审']]
+    .forEach((pair) => {
+      imageReview.appendChild(el('option', {
+        value: pair[0],
+        text: pair[1],
+        selected: (settings.image_review || 'off') === pair[0] ? 'selected' : null,
+      }));
+    });
+  const imageMax = numField('每条消息图片送审上限', settings.image_review_max || 1, 1, 4, 1);
+  const imageHint = el('p', {
+    class: 'card-desc',
+    text: '图片以多模态方式交给同一个审核模型（token 开销更高）；语音按平台转写文本审核；视频/文件只记类型。',
+  });
   const providerInfo = config.providers || {};
   const providerSelect = el('select');
   providerSelect.appendChild(el('option', { value: '', text: '跟随会话默认模型' }));
@@ -869,6 +883,8 @@ async function viewPolicy(root) {
       auto_remove: autoRemove.input.checked,
       mode: modeSelect.value,
       llm_provider_id: providerSelect.value,
+      image_review: imageReview.value,
+      image_review_max: Number(imageMax.input.value),
       llm_min_confidence: Number(minConf.input.value),
       sample_rate: Number(sampleRate.input.value),
       llm_timeout: Number(timeoutField.input.value),
@@ -913,8 +929,11 @@ async function viewPolicy(root) {
     el('div', { class: 'row' }, [
       el('label', { class: 'field' }, [el('span', { text: '默认模式' }), modeSelect]),
       el('label', { class: 'field' }, [el('span', { text: '审核模型' }), providerSelect]),
+      el('label', { class: 'field' }, [el('span', { text: '图片审核' }), imageReview]),
       minConf.node, sampleRate.node, timeoutField.node,
     ]),
+    el('div', { class: 'row' }, [imageMax.node]),
+    imageHint,
     el('div', { class: 'row' }, [qpmField.node, concurrency.node, budget.node, cacheTtl.node, breaker.node]),
     el('div', { class: 'row' }, [maxMuteDays.node, repeatMul.node, autoBlacklist.node, autoRemove.node]),
     providerHint,

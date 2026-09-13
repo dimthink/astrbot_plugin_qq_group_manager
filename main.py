@@ -97,7 +97,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -573,12 +573,17 @@ class QQGroupManager(Star):
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 contexts=[],
+                image_urls=list(request.image_urls) or None,
             )
             return str(getattr(response, "completion_text", "") or "")
         provider = await self.context.get_using_provider_async(umo=umo or None)
         if provider is None:
             raise RuntimeError("未配置可用的对话模型")
-        response = await provider.text_chat(system_prompt=system_prompt, prompt=user_prompt)
+        response = await provider.text_chat(
+            system_prompt=system_prompt,
+            prompt=user_prompt,
+            image_urls=list(request.image_urls) or None,
+        )
         return str(getattr(response, "completion_text", "") or "")
 
     async def _join_judge_call(self, system_prompt: str, user_prompt: str) -> str:
@@ -779,30 +784,59 @@ class QQGroupManager(Star):
         return str(getattr(raw, "id", "") or getattr(event.message_obj, "message_id", "") or "")
 
     @staticmethod
-    def _extract_text(event: AstrMessageEvent) -> tuple[str, str]:
-        """提取待审核文本：正文 + 语音转写；返回 (文本, 消息类型标签)。"""
+    def _extract_text(event: AstrMessageEvent) -> tuple[str, str, list[str]]:
+        """提取待审核内容：正文 + 语音转写 + 图片 URL。
+
+        返回 (文本, 消息类型标签, 图片 URL 列表)。图片是否真的送审由
+        settings.image_review 决定（off / with_text / always）。
+        """
         parts: list[str] = []
+        images: list[str] = []
         base = str(event.message_str or "").strip()
         if base:
             parts.append(base)
         kind = "文本"
+
+        # AstrBot 消息组件里的图片（QQ 官方适配器会把 image 附件转成 Image.fromURL）
+        getter = getattr(event, "get_messages", None)
+        components = []
+        if callable(getter):
+            try:
+                components = list(getter() or [])
+            except Exception:  # pragma: no cover - 兼容异常事件对象
+                components = []
+        for component in components:
+            url = str(getattr(component, "url", "") or getattr(component, "file", "") or "").strip()
+            if url.startswith(("http://", "https://", "base64://", "file://")):
+                images.append(url)
+
+        # 原始 payload 里的附件：语音转写文本 + 图片 URL（组件缺失时兜底）
         raw = getattr(event.message_obj, "raw_message", None)
         attachments = getattr(raw, "attachments", None) or []
         for item in attachments:
             if isinstance(item, dict):
                 asr = item.get("asr_refer_text")
                 content_type = str(item.get("content_type") or "")
+                url = str(item.get("url") or "")
             else:
                 asr = getattr(item, "asr_refer_text", None)
                 content_type = str(getattr(item, "content_type", "") or "")
+                url = str(getattr(item, "url", "") or "")
             if asr:
                 parts.append("[语音转写] " + str(asr))
                 kind = "语音转写"
             elif content_type.startswith("image"):
+                if url and url not in images:
+                    images.append(url)
                 kind = "图片"
             elif content_type.startswith("video"):
                 kind = "视频"
-        return "\n".join(part for part in parts if part).strip(), kind
+
+        if images and parts:
+            kind = "图文"
+        elif images:
+            kind = "图片"
+        return "\n".join(part for part in parts if part).strip(), kind, images
 
     def _seen_message(self, group_id: str, msg_id: str) -> bool:
         """平台可能重复推送同一条消息，这里做短 TTL 去重。"""
@@ -858,8 +892,17 @@ class QQGroupManager(Star):
         msg_id = self._message_id(event)
         if self._seen_message(group_id, msg_id):
             return
-        text, kind = self._extract_text(event)
-        if not text.strip():
+        text, kind, images = self._extract_text(event)
+        image_mode = str(settings.get("image_review") or "off")
+        send_images: list[str] = []
+        if (
+            images
+            and image_mode in ("with_text", "always")
+            and (image_mode == "always" or text.strip())
+        ):
+            limit = int(settings.get("image_review_max", 1) or 1)
+            send_images = images[: max(1, limit)]
+        if not text.strip() and not send_images:
             return
         if self._is_exempt(event, group_id, sender_openid, sender_role):
             return
@@ -889,7 +932,7 @@ class QQGroupManager(Star):
         else:
             days = self._days_in_group(group_id, sender_openid)
             should_send = self.moderator.should_send(
-                rule_summary=evaluation.summary(),
+                rule_summary=evaluation.summary() or ("含图片" if send_images else ""),
                 has_link=evaluation.has_link,
                 long_text=evaluation.long_text,
                 new_member=days is not None and days <= 1,
@@ -901,6 +944,7 @@ class QQGroupManager(Star):
             request = ModerationRequest(
                 group_id=group_id,
                 text=text,
+                image_urls=send_images,
                 sender_openid=sender_openid,
                 sender_name=sender_name,
                 sender_role=sender_role,

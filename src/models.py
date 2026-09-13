@@ -82,6 +82,8 @@ BLACKLIST_PAGE_MAX = 100
 MODERATION_MODES: tuple[str, ...] = ("strict", "standard", "lenient", "log_only")
 JOIN_REVIEW_MODES: tuple[str, ...] = ("off", "strict", "standard", "human")
 
+IMAGE_REVIEW_MODES: tuple[str, ...] = ("off", "with_text", "always")
+
 SEND_CONDITIONS: tuple[str, ...] = (
     "rule_hit",
     "has_link",
@@ -300,6 +302,9 @@ def default_settings() -> dict[str, Any]:
         "llm_max_concurrency": 4,
         "llm_daily_budget": 0,
         "llm_provider_id": "",
+        # 图片审核：off 不送审（默认）／with_text 仅图文混排时把图一起送／always 纯图片也送
+        "image_review": "off",
+        "image_review_max": 1,
         "cache_ttl": 600,
         "circuit_break_threshold": 5,
         "block_llm_on_violation": False,
@@ -360,6 +365,7 @@ NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
     "retention_join_days": (1, 365),
     "audit_queue_maxsize": (100, 100_000),
     "flood_threshold": (0, 100),
+    "image_review_max": (1, 4),
     "probe_full_msg_interval": (300, 86400),
     "capability_log_dedupe_window": (0, 86400),
 }
