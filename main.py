@@ -94,7 +94,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -500,10 +500,16 @@ class QQGroupManager(Star):
             return {"ok": True, "group": self.store.group_or_default(group_id).to_dict()}
 
         settings = self.store.settings()
+        self.logger.info(
+            "开始启用审核：group=%s by=%s（先做一次能力探测）", mask_openid(group_id), caller
+        )
         results = await self.probe_group(group_id, caller=caller)
         state = results.get(CAP_BOT_STATE)
         if state is None or not state.ok:
             note = (state.note if state else "") or "平台未授权（可能需要在开放平台申请白名单）"
+            self.logger.warning(
+                "启用审核失败（无法读取群内状态）：group=%s %s", mask_openid(group_id), note
+            )
             return {
                 "ok": False,
                 "reason_code": "bot_state_unavailable",
@@ -515,6 +521,9 @@ class QQGroupManager(Star):
             and not full_msg.ok
             and not settings.get("allow_without_full_msg", False)
         ):
+            self.logger.warning(
+                "启用审核被拒绝（未开启接收全部消息）：group=%s", mask_openid(group_id)
+            )
             return {"ok": False, "reason_code": "need_full_msg", "message": FULL_MSG_GUIDE}
         warnings: list[str] = []
         is_admin = results.get(CAP_IS_ADMIN)
@@ -670,16 +679,26 @@ class QQGroupManager(Star):
             text = normalize_command(event.message_str or "")
             name, args = match_command(text)
             if name:
-                replies = await self._handle_command(
-                    event,
-                    group_id=group_id,
-                    name=name,
-                    args=args,
-                    admin=bool(event.is_admin()),
-                    group_admin=self.store.is_group_admin(group_id, sender_openid),
-                    sender_openid=sender_openid,
-                    sender_name=sender_name,
+                self.logger.info(
+                    "收到指令：%s（群=%s 发送者=%s）",
+                    name,
+                    mask_openid(group_id),
+                    mask_openid(sender_openid),
                 )
+                try:
+                    replies = await self._handle_command(
+                        event,
+                        group_id=group_id,
+                        name=name,
+                        args=args,
+                        admin=bool(event.is_admin()),
+                        group_admin=self.store.is_group_admin(group_id, sender_openid),
+                        sender_openid=sender_openid,
+                        sender_name=sender_name,
+                    )
+                except Exception as exc:  # 指令异常必须回话，否则用户看到的是"没反应"
+                    self.logger.error("指令 %s 执行失败：%s", name, exc, exc_info=True)
+                    replies = [f"指令执行失败：{type(exc).__name__}: {exc}"]
                 for chunk in replies:
                     if chunk:
                         yield event.plain_result(chunk)
@@ -699,6 +718,27 @@ class QQGroupManager(Star):
                 )
         except Exception as exc:  # pragma: no cover - 不让插件异常影响群聊
             self.logger.error("处理群消息失败：%s", exc, exc_info=True)
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def on_private_message(self, event: AstrMessageEvent):
+        """私聊入口：群管理指令只作用于群聊，这里给出明确回复（而不是静默无响应）。"""
+        try:
+            self._bind_event(event)
+            text = normalize_command(event.message_str or "")
+            name, _args = match_command(text)
+            if not name:
+                return
+            self.logger.info(
+                "收到私聊指令：%s（发送者=%s）", name, mask_openid(event.get_sender_id())
+            )
+            yield event.plain_result(
+                "QQ群管理指令只作用于**群聊**：请在需要管理的群里发送（若机器人只接收 @消息，"
+                "请先 @机器人再发送指令，或在群内开启「接收全部消息」）。\n"
+                "私聊可用的指令：群管理菜单、群管理配置。"
+            )
+        except Exception as exc:  # pragma: no cover
+            self.logger.error("处理私聊消息失败：%s", exc, exc_info=True)
 
     def _bind_event(self, event: AstrMessageEvent) -> None:
         """从事件里绑定平台实例 ID 与 botpy 传输层。"""

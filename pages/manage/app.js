@@ -39,6 +39,77 @@ const LOG_TABS = [
   { kind: 'capability', label: '能力受限' },
 ];
 
+/* --------------------------------------------------------------- 模态框 */
+
+/**
+ * AstrBot 插件页面运行在 sandbox iframe 中（仅 allow-scripts allow-forms allow-downloads），
+ * 原生 window.confirm / alert / prompt 会被浏览器忽略并直接返回 false —— 这正是
+ * 「点按钮没反应」的原因。这里用自绘模态框完全替代它们。
+ */
+function uiModal(options) {
+  const opts = options || {};
+  return new Promise((resolve) => {
+    const overlay = el('div', { class: 'modal-overlay' });
+    const box = el('div', { class: 'modal-box' });
+    box.appendChild(el('h3', { text: opts.title || '请确认' }));
+    if (opts.body) box.appendChild(el('div', { class: 'modal-body', text: opts.body }));
+    let input = null;
+    if (opts.input) {
+      input = el('input', { type: 'text', value: opts.defaultValue || '' });
+      box.appendChild(input);
+    }
+    const onKey = (event) => {
+      if (event.key === 'Escape') close(null);
+      if (event.key === 'Enter' && input) close(input.value);
+    };
+    const close = (value) => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const actions = el('div', { class: 'modal-actions' });
+    if (!opts.hideCancel) {
+      actions.appendChild(el('button', {
+        class: 'btn ghost',
+        text: opts.cancelText || '取消',
+        onclick: () => close(null),
+      }));
+    }
+    actions.appendChild(el('button', {
+      class: 'btn',
+      text: opts.confirmText || '确认',
+      onclick: () => close(input ? input.value : true),
+    }));
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) close(null);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    if (input) input.focus();
+  });
+}
+
+async function uiConfirm(message, confirmText) {
+  return (await uiModal({ title: '请确认', body: message, confirmText: confirmText || '确认' })) === true;
+}
+
+async function uiPrompt(message, defaultValue) {
+  const value = await uiModal({
+    title: '请输入',
+    body: message,
+    input: true,
+    defaultValue: defaultValue || '',
+    confirmText: '确定',
+  });
+  return value === null || value === undefined ? null : String(value);
+}
+
+async function uiNotice(title, body) {
+  await uiModal({ title: title || '提示', body: body, confirmText: '知道了', hideCancel: true });
+}
+
 /* ------------------------------------------------------------------ 工具 */
 
 function el(tag, attrs, children) {
@@ -319,7 +390,7 @@ async function viewGroups(root) {
         toggleBtn.disabled = true;
         const enable = !group.moderation_enabled;
         if (enable) {
-          const ok = window.confirm('启用审核将对该群的全部消息做 LLM 判定（消耗 token）。确认继续？');
+          const ok = await uiConfirm('启用审核将对该群的全部消息做 LLM 判定（消耗 token）。确认继续？');
           if (!ok) { toggleBtn.disabled = false; return; }
         }
         try {
@@ -336,13 +407,13 @@ async function viewGroups(root) {
             }
           } catch (ignore) { /* 非 JSON 错误 */ }
           toast('操作失败：' + message, 'bad');
-          window.alert(message + '\n\n（完整指引：工具 → 指令速查 / docs/CONFIG.md）');
+          await uiNotice('启用审核失败', message);
         } finally { toggleBtn.disabled = false; }
       },
     });
 
     const removeBtn = el('button', { class: 'btn small danger', text: '移除记录', onclick: async () => {
-      if (!window.confirm('仅移除插件侧的群记录，不影响平台与群成员。确认？')) return;
+      if (!(await uiConfirm('仅移除插件侧的群记录，不影响平台与群成员。确认？'))) return;
       removeBtn.disabled = true;
       try {
         await bridge.apiPost('groups/remove', { group_id: group.group_id });
@@ -500,7 +571,7 @@ async function viewLogs(root) {
   ]));
 
   const clearLogsBtn = el('button', { class: 'btn danger', text: '清空当前类型日志', onclick: async () => {
-    if (!window.confirm('将删除 ' + kind + ' 类型的全部日志，操作不可恢复。确认？')) return;
+    if (!(await uiConfirm('将删除 ' + kind + ' 类型的全部日志，操作不可恢复。确认？'))) return;
     clearLogsBtn.disabled = true;
     try {
       const result = await bridge.apiPost('logs/clear', { scope: kind });
@@ -569,7 +640,7 @@ async function viewTools(root) {
   }
 
   const mkDbBtn = (label, op, confirmText) => el('button', { class: 'btn ghost', text: label, onclick: async () => {
-    if (confirmText && !window.confirm(confirmText)) return;
+    if (confirmText && !(await uiConfirm(confirmText))) return;
     try {
       await bridge.apiPost('db/maintain', { op });
       toast('已执行：' + op, 'ok');
@@ -1060,8 +1131,8 @@ async function viewMembers(root) {
         ]),
       ]));
       const removeBtn = el('button', { class: 'btn small danger', text: '移除成员（内邀能力）', onclick: async () => {
-        if (!window.confirm('将调用平台的批量移除接口，操作不可撤销。确认继续？')) return;
-        const openid = window.prompt('请输入要移除的 member_openid：');
+        if (!(await uiConfirm('将调用平台的批量移除接口，操作不可撤销。确认继续？'))) return;
+        const openid = await uiPrompt('请输入要移除的 member_openid：');
         if (!openid) return;
         try {
           const result = await bridge.apiPost('members/remove', {
@@ -1182,7 +1253,7 @@ async function viewJoins(root) {
   const pending = snapshot.pending || [];
   const decision = async (item, op) => {
     const request = item.request || {};
-    const reason = op === 'decline' ? (window.prompt('拒绝理由（可选，会展示给申请人）：') || '') : '';
+    const reason = op === 'decline' ? ((await uiPrompt('拒绝理由（可选，会展示给申请人）：')) || '') : '';
     try {
       await bridge.apiPost('joins/decide', {
         group_id: item.group_id,
@@ -1190,7 +1261,7 @@ async function viewJoins(root) {
         join_request_id: request.join_request_id,
         op,
         reason,
-        blacklist: op === 'decline' ? window.confirm('同时加入群黑名单？（内邀能力，可能失败）') : false,
+        blacklist: op === 'decline' ? await uiConfirm('同时加入群黑名单？（内邀能力，可能失败）') : false,
       });
       toast(op === 'approve' ? '已通过' : '已拒绝', 'ok');
       await render();
@@ -1271,7 +1342,7 @@ async function viewJoins(root) {
       } catch (error) { toast('触发失败：' + error.message, 'bad'); }
     } });
     const whitelist = el('button', { class: 'btn small ghost', text: '白名单', onclick: async () => {
-      const raw = window.prompt('输入要新增的白名单 QQ 号（逗号分隔，留空则改为删除模式）：');
+      const raw = await uiPrompt('输入要新增的白名单 QQ 号（逗号分隔，留空则改为删除模式）：');
       if (raw === null) return;
       try {
         if (raw.trim()) {
@@ -1282,7 +1353,7 @@ async function viewJoins(root) {
           });
           toast('已新增白名单号码', 'ok');
         } else {
-          const del = window.prompt('输入要删除的白名单 QQ 号（逗号分隔）：') || '';
+          const del = (await uiPrompt('输入要删除的白名单 QQ 号（逗号分隔）：')) || '';
           await bridge.apiPost('policy', {
             op: 'whitelist_del',
             strategy_id: item.strategy_id,
