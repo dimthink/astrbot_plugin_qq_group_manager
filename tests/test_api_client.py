@@ -245,3 +245,68 @@ def test_token_bucket_waits_when_empty():
     asyncio.run(bucket.acquire())
     assert clock.slept  # 第二次获取需要等待
     assert clock.slept[0] > 0
+
+
+def test_permission_error_text_is_not_retried():
+    """botpy 在 HTTP 400 时只透出文案，必须按文案识别为权限类错误且不重试。"""
+    transport = FakeTransport(
+        {("GET", INFO_PATH): RaisingError("应用无接口访问权限", name="ServerError")}
+    )
+    api, _ = make_api(transport, max_retries=3)
+    with pytest.raises(QQApiError) as excinfo:
+        asyncio.run(api.get_group_info("g1"))
+    error = excinfo.value
+    assert error.semantic == SEM_NOT_WHITELISTED
+    assert error.retryable is False
+    assert len(transport.calls_for("GET", INFO_PATH)) == 1
+
+
+def test_nested_code_field_is_used_for_semantics():
+    """QQ 可能把业务码放在 code 字段（err_code 是另一套编号）。"""
+    transport = FakeTransport(
+        {
+            ("GET", INFO_PATH): {
+                "err_code": 40012010,
+                "code": 11253,
+                "message": "应用无接口访问权限",
+            }
+        }
+    )
+    api, _ = make_api(transport)
+    with pytest.raises(QQApiError) as excinfo:
+        asyncio.run(api.get_group_info("g1"))
+    assert excinfo.value.semantic == SEM_NOT_WHITELISTED
+    assert len(transport.calls_for("GET", INFO_PATH)) == 1
+
+
+def test_unknown_err_code_falls_back_to_message():
+    transport = FakeTransport(
+        {
+            ("GET", MUTE_GET_PATH): {
+                "err_code": 40012010,
+                "message": "检查是否是管理员未通过",
+            }
+        }
+    )
+    api, _ = make_api(transport)
+    with pytest.raises(QQApiError) as excinfo:
+        asyncio.run(api.get_restrict_setting("g1"))
+    assert excinfo.value.semantic == SEM_NOT_ADMIN
+    assert excinfo.value.retryable is False
+
+
+def test_semantic_from_message_helper():
+    from src.api_client import describe_error, semantic_from_message
+
+    assert semantic_from_message("该接口仅白名单机器人可用")[0] == SEM_NOT_WHITELISTED
+    assert semantic_from_message("无关文案")[0] == "unknown"
+    assert describe_error(11253)[0] == SEM_NOT_WHITELISTED
+
+
+def test_server_error_without_permission_text_is_still_retried():
+    transport = FakeTransport({("GET", INFO_PATH): RaisingError("internal error")})
+    api, _ = make_api(transport, max_retries=1)
+    with pytest.raises(QQApiError) as excinfo:
+        asyncio.run(api.get_group_info("g1"))
+    assert excinfo.value.retryable is True
+    assert len(transport.calls_for("GET", INFO_PATH)) == 2

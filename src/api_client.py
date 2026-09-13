@@ -103,6 +103,31 @@ STATUS_SEMANTICS: dict[int, tuple[str, str]] = {
 }
 
 
+#: 平台在 HTTP 4xx 时只把 message 透出（err_code 会丢），这里按文案兜底识别
+TEXT_SEMANTICS: tuple[tuple[str, tuple[str, str]], ...] = (
+    (
+        "应用无接口访问权限",
+        (SEM_NOT_WHITELISTED, "该接口仅白名单机器人可用，请向 QQ 开放平台申请权限"),
+    ),
+    ("仅白名单", (SEM_NOT_WHITELISTED, "该接口仅白名单机器人可用，请向 QQ 开放平台申请权限")),
+    ("机器人应用未获得调用该接口的权限", (SEM_NOT_WHITELISTED, "需要向 QQ 开放平台申请该接口权限")),
+    ("检查是否是管理员未通过", (SEM_NOT_ADMIN, "机器人未被授予群管理员，请先在群内设置")),
+    ("无操作权限", (SEM_FORBIDDEN, "机器人没有该操作的权限（多为非群管理员）")),
+    ("已超出消息撤回时限", (SEM_RECALL_EXPIRED, "消息发送超过 2 分钟，无法撤回")),
+    ("已被封禁", (SEM_ROBOT_BANNED, "机器人已被封禁，请停止调用并联系平台")),
+    ("不是群成员", (SEM_NOT_MEMBER, "机器人不在该群内")),
+)
+
+
+def semantic_from_message(message: str) -> tuple[str, str]:
+    """按错误文案推断语义（用于 botpy 丢失 err_code 的场景）。"""
+    text = message or ""
+    for keyword, (semantic, hint) in TEXT_SEMANTICS:
+        if keyword in text:
+            return semantic, hint
+    return SEM_UNKNOWN, ""
+
+
 def describe_error(err_code: int | None) -> tuple[str, str]:
     """把 QQ err_code 映射为 (语义, 处置建议)。"""
     if err_code is None:
@@ -481,8 +506,19 @@ class QQGroupAPI:
                 )
                 data = self._normalize_payload(payload)
                 err_code = data.get("err_code")
+                if not isinstance(err_code, int) or err_code == 0:
+                    # QQ 有时把业务码放在 code 字段（err_code 是另一套编号）
+                    nested = data.get("code")
+                    if isinstance(nested, int) and nested:
+                        err_code = nested
                 if isinstance(err_code, int) and err_code != 0:
                     semantic, hint = describe_error(err_code)
+                    if semantic == SEM_UNKNOWN:
+                        text_semantic, text_hint = semantic_from_message(
+                            str(data.get("message") or "")
+                        )
+                        if text_semantic != SEM_UNKNOWN:
+                            semantic, hint = text_semantic, text_hint
                     raise QQApiError(
                         str(data.get("message") or hint),
                         err_code=err_code,
@@ -544,8 +580,23 @@ class QQGroupAPI:
 
     @staticmethod
     def _error_from_exception(exc: Exception, method: str, path: str) -> QQApiError:
-        """把传输层异常翻译成 QQApiError。"""
+        """把传输层异常翻译成 QQApiError。
+
+        botpy 在非 2xx 时只抛出 message 文案（err_code 丢失），且未知状态码会被
+        统一包装成 ServerError —— 因此这里先按文案识别"无权限"类错误并禁止重试，
+        避免对着 400 反复重试。
+        """
         name = type(exc).__name__
+        text_semantic, text_hint = semantic_from_message(str(exc))
+        if text_semantic != SEM_UNKNOWN:
+            return QQApiError(
+                str(exc),
+                semantic=text_semantic,
+                hint=text_hint,
+                method=method,
+                path=path,
+                retryable=False,
+            )
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
             return QQApiError(
                 "请求超时",
