@@ -52,7 +52,7 @@ def will_send(engine: RuleEngine, moderator: LLMModerator, text: str) -> bool:
     evaluation = engine.evaluate(text, group_id="g1")
     return bool(
         moderator.should_send(
-            rule_summary=evaluation.summary(),
+            rule_summary=evaluation.rule_summary(),
             has_link=evaluation.has_link,
             long_text=evaluation.long_text,
             new_member=False,

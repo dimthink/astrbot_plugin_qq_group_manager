@@ -963,7 +963,10 @@ class QQGroupManager(Star):
         else:
             days = self._days_in_group(group_id, sender_openid)
             should_send = self.moderator.should_send(
-                rule_summary=evaluation.summary() or ("含图片" if send_images else ""),
+                # rule_hit 只认规则/模板命中；外链、联系方式、刷屏等内置信号通过
+                # risk>=N 或各自的条件（has_link / has_contact / flood）触发，
+                # 这样"纯闲聊 + 偶尔发个链接"不会消耗 token。
+                rule_summary=evaluation.rule_summary(),
                 has_link=evaluation.has_link,
                 long_text=evaluation.long_text,
                 new_member=days is not None and days <= 1,
@@ -1656,7 +1659,7 @@ class QQGroupManager(Star):
             "signals": evaluation.signals,
             "views": evaluation.views,
             "should_send": self.moderator.should_send(
-                rule_summary=evaluation.summary(),
+                rule_summary=evaluation.rule_summary(),
                 has_link=evaluation.has_link,
                 long_text=evaluation.long_text,
                 new_member=False,

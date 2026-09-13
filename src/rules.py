@@ -155,14 +155,15 @@ SCORE_RULES: dict[str, int] = {
     "template": 45,
     "soft_rule": 20,
     "link": 25,
-    "contact": 30,
+    "contact": 60,
     "digit_run": 20,
+    "digit_run_long": 60,
     "invite_bait": 25,
     "flood": 20,
     "duplicate_content": 35,
     "repeat_chars": 15,
     "long_text": 10,
-    "image": 15,
+    "image": 60,
 }
 
 SIGNAL_LABELS = {
@@ -263,6 +264,13 @@ class RuleEvaluation:
     @property
     def suspicious(self) -> bool:
         return bool(self.hits or self.signals)
+
+    def rule_summary(self) -> str:
+        """只含"规则/模板命中"的摘要，用于 rule_hit 送审条件（不含内置启发式）。"""
+        return "、".join(
+            (hit.pattern if hit.rule_type == "literal" else hit.rule_type + ":" + hit.pattern)
+            for hit in self.hits[:6]
+        )
 
     def summary(self) -> str:
         """给提示词用的可疑点摘要。"""
@@ -488,7 +496,7 @@ class RuleEngine:
             for view in (views.compact, views.skeleton):
                 if view and needle in view:
                     return needle, False
-            return "", False
+            return self._match_pinyin(rule, views)
 
         # literal：先按原样子串（精确命中），再退回归一化/骨架（变体命中）
         lowered = (views.raw or "").lower()
@@ -499,6 +507,18 @@ class RuleEngine:
             for view in (views.compact, views.skeleton):
                 if view and needle in view:
                     return needle, False
+        return self._match_pinyin(rule, views)
+
+    def _match_pinyin(self, rule: dict[str, Any], views: Any) -> tuple[str, bool]:
+        """同音兜底：把规则词转成拼音骨架后在消息的拼音视图里找（如 jiaqunlingziliao）。"""
+        if not self.pinyin_enabled or not views.pinyin:
+            return "", False
+        needle = rule.get("pattern_pinyin")
+        if needle is None:
+            needle = to_pinyin_skeleton(rule["pattern"])
+            rule["pattern_pinyin"] = needle
+        if needle and needle in views.pinyin:
+            return str(needle), False
         return "", False
 
     def _normalized_pattern(self, rule: dict[str, Any]) -> str:
@@ -614,10 +634,14 @@ class RuleEngine:
         if CONTACT_RE.search(views.raw or "") or CONTACT_RE.search(views.compact):
             result.has_contact = True
             result.signals["contact"] = SCORE_RULES["contact"]
-        if longest_digit_run(text or "") >= 6 and any(
+        digit_run = longest_digit_run(text or "")
+        if digit_run >= 6 and any(
             word in views.skeleton for word in ("加", "群", "资料", "领", "联系")
         ):
-            result.signals["digit_run"] = SCORE_RULES["digit_run"]
+            # 6~7 位只是弱信号；8 位以上（接近手机号/QQ号）单独就足以送审
+            result.signals["digit_run"] = (
+                SCORE_RULES["digit_run_long"] if digit_run >= 8 else SCORE_RULES["digit_run"]
+            )
         if any(word in views.skeleton for word in INVITE_VERBS) and any(
             word in views.skeleton for word in BAIT_NOUNS
         ):

@@ -124,10 +124,11 @@ def to_pinyin_skeleton(text: str) -> str:
     try:
         from pypinyin import Style, lazy_pinyin
 
-        parts = lazy_pinyin(text, style=Style.NORMAL, errors="ignore")
+        # errors="default"：非汉字原样保留（否则 latin 写法会被整段丢弃）
+        parts = lazy_pinyin(text, style=Style.NORMAL, errors="default")
     except Exception:  # pragma: no cover - pypinyin 异常时降级
         return ""
-    return "".join(part for part in parts if part.isalnum())
+    return "".join(char for char in "".join(parts) if char.isalnum())
 
 
 @dataclass(slots=True)
