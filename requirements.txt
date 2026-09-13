@@ -1,0 +1,2 @@
+# 本插件只依赖 Python 标准库（sqlite3 / asyncio / json ...）。
+# botpy 由 AstrBot 本体提供，无需在此声明。
