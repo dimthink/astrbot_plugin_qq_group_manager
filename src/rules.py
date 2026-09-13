@@ -42,11 +42,14 @@ LINK_RE = re.compile(
 CONTACT_RE = re.compile(
     r"(?:扣扣|抠抠|qq|q群|企鹅|微信|weixin|wechat|vx|wx|v信|威信|telegram|tg|纸飞机)"
     r"\s*[:：号]?\s*[0-9a-zA-Z_-]{4,}"
+    r"|(?:[vV]\s*[:：]\s*[0-9a-zA-Z_-]{4,})"
+    r"|(?:群号|裙号)\s*[:：]?\s*\d{5,}"
     r"|(?:1[3-9]\d{9})"
     r"|(?:wxid_[0-9a-zA-Z_-]+)",
     re.IGNORECASE,
 )
 
+#: 引导动作词（"去哪里"）
 INVITE_VERBS = (
     "加群",
     "进群",
@@ -54,17 +57,44 @@ INVITE_VERBS = (
     "拉群",
     "扫码进群",
     "扫码加",
+    "扫码",
     "私聊",
     "私信",
-    "联系",
-    "关注",
+    "私我",
+    "加我",
+    "加v",
+    "加薇",
+    "加微",
+    "威信",
+    "联系我",
+    "扣我",
     "点击",
+    "关注",
     "领取",
     "免费领",
-    "白嫖",
-    "内部",
-    "jiaqun",
+    "群号",
+    "二维码",
+    "主页",
+    "头像",
+    "公告",
+    "自取",
+    "付 费",
+    "付费",
+    "问管理",
+    "找管理",
+    "私撩",
+    "速进",
+    "速上",
+    "上车",
+    "发车",
+    "扣群",
+    "进来",
+    "加你",
+    "扣扣",
+    "更多",
 )
+
+#: 诱饵/资源词（"给什么"）
 BAIT_NOUNS = (
     "资料",
     "资源",
@@ -85,14 +115,203 @@ BAIT_NOUNS = (
     "博彩",
     "裸聊",
     "约炮",
+    "看片",
+    "片",
+    "影视",
+    "种子",
+    "磁力",
+    "合集",
+    "目录",
+    "破解",
+    "会员",
+    "惊喜",
+    "车牌",
+    "新片",
+    "老片",
+    "链接",
+    "app",
+    "地址",
+    "在线",
+    "资源站",
+    "内部",
+    "冷门",
 )
 
+#: 黑话/暗语标记（单独出现不算，但与他项组合即为强信号）
+SPAM_MARKERS = (
+    "懂的都懂",
+    "懂的来",
+    "你懂的",
+    "先到先得",
+    "手慢无",
+    "非诚勿扰",
+    "永久有效",
+    "每日更新",
+    "秒发",
+    "诚信",
+    "限时",
+    "安全可靠",
+    "拒绝白嫖",
+    "白嫖",
+    "寂寞",
+    "睡不着",
+    "深夜",
+    "老司机",
+    "速上",
+    "速进",
+    "别声张",
+    "不迷路",
+    "防失联",
+    "备用群",
+    "内部群",
+    "拉你进群",
+    "拉你进",
+    "看更多",
+    "朋友圈",
+    "代找",
+    "群主推荐",
+    "一包烟钱",
+    "全网资源",
+    "想要的都",
+    "上车",
+    "车牌在",
+    "稳赚",
+    "稳赚不赔",
+    "日赚",
+    "无风险",
+    "全网首发",
+    "仅限今天",
+    "限量",
+    "加我扣扣",
+    "加我微信",
+)
+
+#: 强标记词：单独出现在**短消息**里即可判定为暗语引流
+STRONG_MARKERS = (
+    "懂的都懂",
+    "懂的来",
+    "你懂的",
+    "自取",
+    "上车",
+    "防失联",
+    "备用群",
+    "内部群",
+    "加v",
+    "加薇",
+    "加微",
+    "私聊我",
+    "速上",
+)
+
+#: 内置广告模板（可被 KV keywords.templates 覆盖/追加）
 BUILTIN_TEMPLATES: list[dict[str, Any]] = [
     {
         "id": "ad_invite",
         "name": "拉群引流",
-        "all_of": [{"any_of": list(INVITE_VERBS)}, {"any_of": list(BAIT_NOUNS)}],
-        "score": 45,
+        "all_of": [
+            {"any_of": list(INVITE_VERBS)},
+            {"any_of": [*BAIT_NOUNS, *SPAM_MARKERS]},
+        ],
+        "score": 50,
+        "category": "广告引流",
+        "severity": 3,
+        "action": ["warn", "recall"],
+    },
+    {
+        "id": "ad_lure",
+        "name": "黑话引流",
+        "all_of": [
+            {"any_of": list(SPAM_MARKERS)},
+            {"any_of": list(BAIT_NOUNS)},
+        ],
+        "score": 55,
+        "category": "广告引流",
+        "severity": 3,
+        "action": ["warn", "recall"],
+    },
+    {
+        "id": "ad_night",
+        "name": "深夜福利引流",
+        "all_of": [
+            {
+                "any_of": [
+                    "深夜",
+                    "老司机",
+                    "发车",
+                    "上车",
+                    "车牌",
+                    "开车",
+                    "寂寞",
+                    "睡不着",
+                    "看片",
+                ]
+            },
+            {"any_of": ["福利", "资源", "片", "群", "公告", "惊喜", "车牌", "影视"]},
+        ],
+        "score": 60,
+        "category": "色情低俗",
+        "severity": 4,
+        "action": ["warn", "recall", "mute", "report"],
+    },
+    {
+        "id": "ad_piracy",
+        "name": "盗版资源贩卖",
+        "all_of": [
+            {
+                "any_of": [
+                    "资源",
+                    "种子",
+                    "磁力",
+                    "破解",
+                    "会员",
+                    "影视",
+                    "合集",
+                    "打包",
+                    "目录",
+                    "看片",
+                ]
+            },
+            {
+                "any_of": [
+                    "进群",
+                    "私聊",
+                    "管理",
+                    "地址",
+                    "自取",
+                    "付费",
+                    "群",
+                    "低价",
+                    "代找",
+                    "秒发",
+                ]
+            },
+        ],
+        "score": 55,
+        "category": "广告引流",
+        "severity": 3,
+        "action": ["warn", "recall"],
+    },
+    {
+        "id": "ad_call",
+        "name": "召唤式引流",
+        "all_of": [
+            {
+                "any_of": [
+                    "加我",
+                    "加你",
+                    "私我",
+                    "扣我",
+                    "联系我",
+                    "加v",
+                    "加微",
+                    "扣扣",
+                    "威信",
+                    "私聊",
+                ]
+            },
+            {"any_of": ["领取", "免费", "资料", "资源", "福利", "群", "号", "看", "更多", "惊喜"]},
+        ],
+        "score": 50,
         "category": "广告引流",
         "severity": 3,
         "action": ["warn", "recall"],
@@ -101,10 +320,10 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
         "id": "ad_contact",
         "name": "私聊引流",
         "all_of": [
-            {"any_of": ["私聊", "私信", "加我", "联系我", "加v", "加微", "加qq", "扣我"]},
+            {"any_of": ["私聊", "私信", "加我", "联系我", "加v", "加微", "加qq", "扣我", "私撩"]},
             {"any_of": [*BAIT_NOUNS, "号", "群"]},
         ],
-        "score": 45,
+        "score": 50,
         "category": "广告引流",
         "severity": 3,
         "action": ["warn", "recall"],
@@ -116,7 +335,7 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
             {"any_of": ["兼职", "刷单", "日结", "在家做", "轻松赚", "躺赚"]},
             {"any_of": ["日入", "月入", "元", "结算", "押金", "垫付", "返利"]},
         ],
-        "score": 50,
+        "score": 55,
         "category": "诈骗赌博",
         "severity": 4,
         "action": ["warn", "recall", "mute", "report"],
@@ -128,7 +347,7 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
             {"any_of": ["博彩", "彩票", "下注", "押注", "赌场", "棋牌", "六合", "时时彩"]},
             {"any_of": ["群", "平台", "app", "网址", "链接", "代理", "返水"]},
         ],
-        "score": 55,
+        "score": 60,
         "category": "诈骗赌博",
         "severity": 4,
         "action": ["warn", "recall", "mute", "report"],
@@ -140,7 +359,7 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
             {"any_of": ["裸聊", "约炮", "福利姬", "福利群", "色情", "成人", "av"]},
             {"any_of": ["群", "加", "进", "链接", "app", "资源"]},
         ],
-        "score": 60,
+        "score": 65,
         "category": "色情低俗",
         "severity": 5,
         "action": ["warn", "recall", "mute", "report"],
@@ -159,6 +378,11 @@ SCORE_RULES: dict[str, int] = {
     "digit_run": 20,
     "digit_run_long": 60,
     "invite_bait": 25,
+    "spam_marker": 40,
+    "spam_markers_many": 60,
+    "bait_many": 60,
+    "bait_pair": 40,
+    "coded_hint": 25,
     "flood": 20,
     "duplicate_content": 35,
     "repeat_chars": 15,
@@ -171,6 +395,11 @@ SIGNAL_LABELS = {
     "contact": "疑似联系方式",
     "digit_run": "含长数字串且伴随引流词",
     "invite_bait": "含拉群动作词与诱饵词",
+    "spam_marker": "含引流黑话",
+    "spam_markers_many": "多处引流黑话",
+    "bait_many": "多个资源/诱饵词",
+    "bait_pair": "两个资源/诱饵词",
+    "coded_hint": "短消息暗语",
     "flood": "短时间高频发言",
     "duplicate_content": "同一文案多号发送",
     "repeat_chars": "重复字符刷屏",
@@ -606,7 +835,7 @@ class RuleEngine:
                     ):
                         found = word
                         break
-                if not found:
+                if not found or found in matched_words:
                     ok = False
                     break
                 matched_words.append(found)
@@ -642,10 +871,28 @@ class RuleEngine:
             result.signals["digit_run"] = (
                 SCORE_RULES["digit_run_long"] if digit_run >= 8 else SCORE_RULES["digit_run"]
             )
-        if any(word in views.skeleton for word in INVITE_VERBS) and any(
-            word in views.skeleton for word in BAIT_NOUNS
-        ):
+        skeleton = views.skeleton
+        compact = views.compact
+        verb_hits = [word for word in INVITE_VERBS if word in skeleton]
+        bait_hits = [word for word in BAIT_NOUNS if word in skeleton]
+        marker_hits = [word for word in SPAM_MARKERS if word in skeleton or word in compact]
+        if verb_hits and bait_hits:
             result.signals["invite_bait"] = SCORE_RULES["invite_bait"]
+        if marker_hits:
+            result.signals["spam_marker"] = SCORE_RULES["spam_marker"]
+        if len(marker_hits) >= 2:
+            result.signals["spam_markers_many"] = SCORE_RULES["spam_markers_many"]
+        if len(bait_hits) >= 3:
+            result.signals["bait_many"] = SCORE_RULES["bait_many"]
+        elif len(bait_hits) == 2:
+            result.signals["bait_many"] = SCORE_RULES["bait_pair"]
+        # 短消息 + 强暗语（你懂的 / 懂的都懂 / 上车 / 车牌…）才算暗语引流，
+        # "深夜""睡不着"这类弱标记不算，避免把"深夜加班"误判。
+        if (
+            any(word in skeleton or word in compact for word in STRONG_MARKERS)
+            and len(skeleton) <= 12
+        ):
+            result.signals["coded_hint"] = SCORE_RULES["coded_hint"]
         if recent_messages >= max(1, flood_threshold):
             result.flood = True
             result.recent_messages = recent_messages

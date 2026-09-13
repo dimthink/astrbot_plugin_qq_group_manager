@@ -12,11 +12,13 @@ from pathlib import Path
 from src.moderator import LLMModerator
 from src.rules import RuleEngine
 
-CORPUS_PATH = Path(__file__).resolve().parent / "data" / "rule_corpus.json"
+CORPUS_DIR = Path(__file__).resolve().parent / "data"
+#: 合成语料（覆盖各类变体写法）+ 真实反垃圾语料（用户提供，已去敏）
+CORPUS_FILES = ("rule_corpus.json", "rule_corpus_real.json")
 
 
-def load_corpus() -> dict:
-    return json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+def load_corpus(name: str = "rule_corpus.json") -> dict:
+    return json.loads((CORPUS_DIR / name).read_text(encoding="utf-8"))
 
 
 def build() -> tuple[RuleEngine, LLMModerator]:
@@ -66,23 +68,27 @@ def will_send(engine: RuleEngine, moderator: LLMModerator, text: str) -> bool:
 
 
 def test_positive_corpus_send_rate():
-    corpus = load_corpus()
     engine, moderator = build()
-    missed = [text for text in corpus["positive"] if not will_send(engine, moderator, text)]
-    rate = 1 - len(missed) / max(1, len(corpus["positive"]))
-    assert rate >= corpus["targets"]["positive_send_rate"], (
-        "正样本送审率 " + f"{rate:.2%}" + " 低于目标，漏检：" + repr(missed)
-    )
+    failures: list[str] = []
+    for name in CORPUS_FILES:
+        corpus = load_corpus(name)
+        missed = [text for text in corpus["positive"] if not will_send(engine, moderator, text)]
+        rate = 1 - len(missed) / max(1, len(corpus["positive"]))
+        if rate < corpus["targets"]["positive_send_rate"]:
+            failures.append(name + "：" + f"{rate:.2%}" + " 低于目标，漏检 " + repr(missed))
+    assert not failures, "；".join(failures)
 
 
 def test_negative_corpus_false_positive_rate():
-    corpus = load_corpus()
     engine, moderator = build()
-    flagged = [text for text in corpus["negative"] if will_send(engine, moderator, text)]
-    rate = len(flagged) / max(1, len(corpus["negative"]))
-    assert rate <= corpus["targets"]["negative_send_rate"], (
-        "负样本误送审率 " + f"{rate:.2%}" + " 超目标，误报：" + repr(flagged)
-    )
+    failures: list[str] = []
+    for name in CORPUS_FILES:
+        corpus = load_corpus(name)
+        flagged = [text for text in corpus["negative"] if will_send(engine, moderator, text)]
+        rate = len(flagged) / max(1, len(corpus["negative"]))
+        if rate > corpus["targets"]["negative_send_rate"]:
+            failures.append(name + "：" + f"{rate:.2%}" + " 超目标，误报 " + repr(flagged))
+    assert not failures, "；".join(failures)
 
 
 def test_exact_rule_still_enforces_directly():
