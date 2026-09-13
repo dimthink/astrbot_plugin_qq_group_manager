@@ -282,6 +282,8 @@ class ActionExecutor:
         return {
             "event_id": event_id,
             "mode": mode,
+            "planned": planned,
+            "skipped": limited,
             "actions": [result.to_dict() for result in results],
             "verdict": verdict.verdict,
             "category": verdict.category,

@@ -97,7 +97,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -950,12 +950,18 @@ class QQGroupManager(Star):
         )
         if verdict.is_violation:
             self.logger.info(
-                "审核判定 %s/%s sev=%s conf=%.2f 动作=%s",
+                "审核判定 %s/%s sev=%s conf=%.2f 实际动作=%s 计划动作=%s%s",
                 verdict.verdict,
                 verdict.category,
                 verdict.severity,
                 verdict.confidence,
                 [item.get("action") for item in summary.get("actions") or []],
+                summary.get("planned") or [],
+                (
+                    "（被拦下：" + str(summary.get("skipped")) + "）"
+                    if summary.get("skipped")
+                    else ""
+                ),
             )
             if settings.get("block_llm_on_violation", False):
                 event.should_call_llm(False)

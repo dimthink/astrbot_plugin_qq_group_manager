@@ -963,6 +963,8 @@ async function viewKeywords(root) {
   const actionBoxes = {};
   MATRIX_ACTIONS.forEach((action) => {
     const box = el('input', { type: 'checkbox' });
+    // 硬规则的常见诉求是"撤回+禁言"，默认勾选这两个，避免新建规则后只警告
+    box.checked = action === 'recall' || action === 'mute';
     actionBoxes[action] = box;
     actionWrap.appendChild(el('label', { class: 'switch' }, [box, el('span', { text: ACTION_LABELS[action] })]));
   });
@@ -1010,7 +1012,7 @@ async function viewKeywords(root) {
     finally { testBtn.disabled = false; }
   } });
 
-  root.appendChild(card('添加规则', '硬规则命中即按所选动作处置；软规则只提升关注度，最终仍由 LLM 判定。', [
+  root.appendChild(card('添加规则', '硬规则命中即按【规则自身所选动作】处置（不再叠加处置矩阵）；软规则只提升关注度，最终仍由 LLM 判定。', [
     el('div', { class: 'row' }, [bucketSelect, typeSelect, patternInput, groupSelect]),
     actionWrap,
     el('div', { class: 'field-actions' }, [addBtn]),

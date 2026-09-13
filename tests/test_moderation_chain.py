@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from src.actions import ActionExecutor
 from src.api_client import QQGroupAPI
 from src.audit import AuditStore
-from src.models import CapabilityResult
+from src.models import CapabilityResult, Verdict
 from src.moderator import LLMModerator
 from src.rules import RuleEngine
 from src.store import PluginStore
@@ -388,5 +388,65 @@ def test_new_group_follows_global_mode_instead_of_copying():
         await store.update_settings({"mode": "standard"})
         # 生效模式随之变化
         assert (store.group("g-new").mode or store.get_setting("mode")) == "standard"
+
+    asyncio.run(scenario())
+
+
+def test_update_keywords_reloads_rule_engine(tmp_path):
+    """WebUI/指令保存关键词后必须立即生效（曾因绕过 service 而未热更新）。"""
+
+    async def scenario():
+        chain = await run_chain(tmp_path)
+        service = chain.service
+        # 初始无规则 → 不命中
+        assert service.rules.evaluate("违禁词测试", group_id="g1").hard_hits == []
+        await service.update_keywords(
+            {
+                "hard": [
+                    {
+                        "id": "kw1",
+                        "type": "literal",
+                        "pattern": "违禁词测试",
+                        "action": ["recall", "mute"],
+                        "scope": "all",
+                        "enabled": True,
+                    }
+                ],
+                "soft": [],
+            }
+        )
+        hits = service.rules.evaluate("违禁词测试", group_id="g1").hard_hits
+        assert len(hits) == 1
+        assert hits[0].actions == ["recall", "mute"]
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_webui_keyword_save_goes_through_service():
+    """保证 WebUI 的 keywords 保存路径调用 service.update_keywords（会热更新规则引擎）。"""
+
+    source = (PLUGIN_ROOT / "src" / "web_api.py").read_text(encoding="utf-8")
+    assert "self.service.update_keywords(" in source, (
+        "WebUI 保存关键词必须走 service.update_keywords，否则规则不会热更新"
+    )
+    assert "await store.update_keywords(" not in source, (
+        "不要直接调用 store.update_keywords：它不会 reload 规则引擎"
+    )
+
+
+def test_handler_summary_reports_planned_and_skipped(tmp_path):
+    """审核摘要要能说明"计划动作 vs 实际动作"，便于排查"为什么没禁言"。"""
+
+    async def scenario():
+        chain = await run_chain(tmp_path, mode="lenient", dry_run=False)
+        # lenient 会拦下 recall/mute，只保留 warn
+        planned = chain.service.actions.plan_actions(
+            verdict=Verdict(verdict="violation", severity=4, category="广告引流"),
+            settings=chain.store.settings(),
+            hard_actions=["warn", "recall", "mute"],
+        )
+        assert planned == ["warn", "recall", "mute"]
+        await chain.close()
 
     asyncio.run(scenario())

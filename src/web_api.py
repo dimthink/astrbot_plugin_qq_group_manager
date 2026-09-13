@@ -239,8 +239,10 @@ class WebApi:
                 settings = await store.update_settings(data)
                 return json_response({"section": section, "settings": settings})
             if section == "keywords":
-                await store.update_keywords(data)
-                return json_response({"section": section, "keywords": store.keywords()})
+                # 必须走 service：它会在写库后 hot-reload 规则引擎，
+                # 否则 WebUI 里改的动作（例如给硬规则加"禁言"）要等插件重载才生效。
+                keywords = await self.service.update_keywords(data)
+                return json_response({"section": section, "keywords": keywords})
             if section == "ui_state":
                 state = await store.update_ui_state(data)
                 return json_response({"section": section, "ui_state": state})
