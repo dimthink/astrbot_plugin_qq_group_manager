@@ -92,6 +92,12 @@ class WebApi:
             ),
             (f"/{PLUGIN_NAME}/groups/add", self.group_add, ["POST"], "手动添加群"),
             (
+                f"/{PLUGIN_NAME}/groups/mode",
+                self.group_mode,
+                ["POST"],
+                "设置某群审核模式（空=跟随全局）",
+            ),
+            (
                 f"/{PLUGIN_NAME}/groups/join_mode",
                 self.group_join_mode,
                 ["POST"],
@@ -310,6 +316,22 @@ class WebApi:
                 data={"reason_code": result.get("reason_code"), **result},
             )
         return json_response(result)
+
+    async def group_mode(self):
+        """设置某群的审核模式；mode 传空串表示"跟随全局"。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "").strip()
+        mode = str((payload or {}).get("mode") or "").strip()
+        if not group_id:
+            return error_response("缺少 group_id")
+        if mode and mode not in MODERATION_MODES:
+            return error_response(
+                f"mode 必须是 {', '.join(MODERATION_MODES)} 之一，或留空表示跟随全局"
+            )
+        config = await self.service.store.update_group(group_id, {"mode": mode})
+        return json_response({"group": config.to_dict(), "groups": self.service.groups_snapshot()})
 
     async def group_join_mode(self):
         """设置某群的入群审批模式（off/strict/standard/human）。"""

@@ -348,3 +348,45 @@ def test_dry_run_command_toggles_setting(tmp_path):
         await chain.close()
 
     asyncio.run(scenario())
+
+
+def test_group_mode_override_and_follow_global(tmp_path):
+    """群级模式覆盖优先于全局；「审核模式 跟随」应清除覆盖。"""
+
+    async def scenario():
+        chain = await run_chain(tmp_path, mode="lenient")
+        main = load_main()
+        service = chain.service
+        # 全局改成标准，但群级仍覆盖为 lenient —— 生效模式应为 lenient
+        await service.store.update_settings({"mode": "standard"})
+        await service.store.update_group("g1", {"mode": "lenient"})
+        text = await main.QQGroupManager._cmd_mode(service, "g1", [])
+        assert "宽松" in text[0] and "群级覆盖" in text[0]
+        # 切到跟随全局
+        reply = await main.QQGroupManager._cmd_mode(service, "g1", ["跟随"])
+        assert "跟随全局" in reply[0]
+        assert not service.store.group("g1").mode
+        text2 = await main.QQGroupManager._cmd_mode(service, "g1", [])
+        assert "标准" in text2[0] and "跟随全局" in text2[0]
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_new_group_follows_global_mode_instead_of_copying():
+    """新建群记录不应把当时的全局模式复制成群级覆盖（历史 bug 的回归测试）。"""
+
+    async def scenario():
+        from src.store import PluginStore
+        from tests.fakes import FakeKV
+
+        store = PluginStore(FakeKV())
+        await store.load()
+        await store.update_settings({"mode": "strict"})
+        await store.ensure_group("g-new", name="新群")
+        assert store.group("g-new").mode == "", "群级模式应留空以跟随全局"
+        await store.update_settings({"mode": "standard"})
+        # 生效模式随之变化
+        assert (store.group("g-new").mode or store.get_setting("mode")) == "standard"
+
+    asyncio.run(scenario())

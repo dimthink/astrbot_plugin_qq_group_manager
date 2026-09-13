@@ -437,7 +437,32 @@ async function viewGroups(root) {
       ]),
       el('td', {}, stateTags),
       el('td', {}, [capabilityTags(group, options)]),
-      el('td', { text: group.effective_mode || '-' }),
+      el('td', {}, [(() => {
+        const modeSelect = el('select');
+        modeSelect.appendChild(el('option', {
+          value: '',
+          text: '跟随全局（' + ((config.settings || {}).mode || '') + '）',
+          selected: !group.mode ? 'selected' : null,
+        }));
+        (config.options && config.options.modes ? config.options.modes : []).forEach((mode) => {
+          modeSelect.appendChild(el('option', {
+            value: mode,
+            text: mode,
+            selected: group.mode === mode ? 'selected' : null,
+          }));
+        });
+        modeSelect.addEventListener('change', async () => {
+          try {
+            await bridge.apiPost('groups/mode', { group_id: group.group_id, mode: modeSelect.value });
+            state.config = null;
+            toast('本群模式已更新为：' + (modeSelect.value || '跟随全局'), 'ok');
+            await render();
+          } catch (error) {
+            toast('更新失败：' + ((error && error.message) || error), 'bad');
+          }
+        });
+        return modeSelect;
+      })()]),
       el('td', { text: group.last_seen_iso ? fmtTime(group.last_seen_iso) : '—' }),
       el('td', {}, [el('div', { class: 'field-actions' }, [toggleBtn, probeBtn, removeBtn])]),
     ]));

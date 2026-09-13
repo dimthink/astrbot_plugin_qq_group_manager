@@ -89,6 +89,8 @@ FULL_MSG_GUIDE = (
 
 WEBUI_HINT = "完整配置与日志：AstrBot WebUI → 插件管理 → 「QQ群管理」→ 管理台页面。"
 
+MODE_FOLLOW = ("跟随", "跟随全局", "默认", "继承", "global", "follow")
+
 MODE_LABELS = {
     "strict": "严格",
     "standard": "标准",
@@ -102,6 +104,13 @@ JOIN_MODE_LABELS = {
     "standard": "标准（高置信自动，其余转人工）",
     "human": "全部人工",
 }
+
+
+def mode_label_with_source(mode: str, group_mode: str, global_mode: str) -> str:
+    """展示生效模式及其来源（群级覆盖 / 跟随全局）。"""
+    if group_mode:
+        return f"{MODE_LABELS.get(group_mode, group_mode)}（群级覆盖）"
+    return f"{MODE_LABELS.get(global_mode, global_mode)}（跟随全局）"
 
 
 def match_command(text: str) -> tuple[str, list[str]]:
@@ -217,7 +226,7 @@ def moderation_status_text(
         lines.append(f"• 审核：已暂停（{paused_reason}）")
     else:
         lines.append("• 审核：未开启")
-    lines.append(f"• 模式：{MODE_LABELS.get(mode, mode or '默认')}")
+    lines.append(f"• 模式：{mode}")
     lines.append(f"• 入群审批：{JOIN_MODE_LABELS.get(join_mode, join_mode or '关闭')}")
     if dry_run:
         lines.append("• 运行模式：dry-run（只记录、不实际处置）")

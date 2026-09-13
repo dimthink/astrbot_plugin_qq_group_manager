@@ -44,6 +44,7 @@ from .src.commands import (
     LOG_COMMANDS,
     MENU_COMMANDS,
     MODE_COMMANDS,
+    MODE_FOLLOW,
     MODE_LABELS,
     MUTE_COMMANDS,
     RECALL_COMMANDS,
@@ -63,6 +64,7 @@ from .src.commands import (
     log_text,
     match_command,
     menu_text,
+    mode_label_with_source,
     moderation_status_text,
     selfcheck_text,
     stats_text,
@@ -95,7 +97,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -1099,7 +1101,11 @@ class QQGroupManager(Star):
         return moderation_status_text(
             group_id=group_id,
             enabled=config.moderation_enabled,
-            mode=config.mode or str(self.store.get_setting("mode") or ""),
+            mode=mode_label_with_source(
+                "",
+                str(config.mode or ""),
+                str(self.store.get_setting("mode") or ""),
+            ),
             paused_reason=config.paused_reason,
             full_msg=(caps.get(CAP_FULL_MSG) or {}).get("ok"),
             is_admin=(caps.get(CAP_IS_ADMIN) or {}).get("ok"),
@@ -1123,17 +1129,29 @@ class QQGroupManager(Star):
     async def _cmd_mode(self, group_id: str, args: list[str]) -> list[str]:
         if not args:
             return [
-                "当前模式："
-                + str(self.store.group_or_default(group_id).mode or self.store.get_setting("mode"))
-                + "\n用法：审核模式 严格/标准/宽松/仅记录"
+                "当前生效模式："
+                + mode_label_with_source(
+                    "",
+                    str(self.store.group_or_default(group_id).mode or ""),
+                    str(self.store.get_setting("mode") or ""),
+                )
+                + "\n用法：审核模式 严格/标准/宽松/仅记录/跟随（跟随全局）"
             ]
         label = args[0]
+        if label in MODE_FOLLOW:
+            await self.store.update_group(group_id, {"mode": ""})
+            current = str(self.store.get_setting("mode") or "")
+            return [
+                "本群已改为跟随全局模式："
+                + MODE_LABELS.get(current, current)
+                + "（管理台「策略」页可改全局默认）"
+            ]
         reverse = {value: key for key, value in MODE_LABELS.items()}
         mode = reverse.get(label, label if label in MODERATION_MODES else "")
         if not mode:
-            return ["未知模式，可选：严格 / 标准 / 宽松 / 仅记录"]
+            return ["未知模式，可选：严格 / 标准 / 宽松 / 仅记录 / 跟随（跟随全局）"]
         await self.store.update_group(group_id, {"mode": mode})
-        return [f"本群审核模式已切换为：{MODE_LABELS.get(mode, mode)}"]
+        return [f"本群审核模式已切换为：{MODE_LABELS.get(mode, mode)}（群级覆盖）"]
 
     async def _cmd_threshold(self, args: list[str]) -> list[str]:
         if not args:

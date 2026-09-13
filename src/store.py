@@ -255,7 +255,9 @@ class PluginStore:
                 added_at=now_ts(),
                 last_seen=now_ts(),
                 source=source,
-                mode=str(self._settings.get("mode") or ""),
+                # 刻意留空：空 = 跟随全局模式。早期版本会把当时的全局默认值复制进来，
+                # 导致之后在管理台改「默认模式」对已登记的群完全不起作用。
+                mode="",
                 join_review_mode="",
             )
             self._groups[group_id] = config

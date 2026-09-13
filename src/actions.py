@@ -213,7 +213,11 @@ class ActionExecutor:
         limited_note = ("（" + "；".join(notes) + "）") if notes else ""
         if limited and self.logger is not None:
             self.logger.info(
-                "以下动作未执行：%s（模式=%s，dry_run=%s）", limited, mode, dry_run_now
+                "以下动作未执行：%s（模式=%s%s，dry_run=%s）",
+                limited,
+                mode,
+                "，群级覆盖" if str(config.mode or "") else "，跟随全局",
+                dry_run_now,
             )
 
         event_id: int | None = None
