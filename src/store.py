@@ -106,6 +106,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         "group_rules_brief",
         "prompt_system",
         "prompt_user",
+        "llm_provider_id",
     ):
         settings[key] = str(settings.get(key) or "")
     return settings

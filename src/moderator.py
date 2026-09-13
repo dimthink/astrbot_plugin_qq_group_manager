@@ -429,3 +429,21 @@ class ModerationOutcome:
     sampled: bool = False
     source: str = "llm"
     hits: list[dict[str, Any]] = field(default_factory=list)
+
+
+def choose_provider_id(
+    configured: str,
+    session_default: str,
+    available: list[str] | set[str] | None = None,
+) -> str:
+    """选择用于审核的对话模型 Provider。
+
+    优先级：WebUI 显式配置的审核模型 → 当前会话默认模型。
+    配置的模型已经不存在（被删除/改名）时回退到会话默认，避免审核链路直接不可用。
+    """
+    known = {str(item) for item in (available or []) if str(item)}
+    want = str(configured or "").strip()
+    fallback = str(session_default or "").strip()
+    if want and (not known or want in known):
+        return want
+    return fallback

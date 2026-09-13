@@ -52,8 +52,9 @@
 | `enabled` | true | 插件总开关 |
 | `dry_run` | true | 只记录不处置 |
 | `mode` | lenient | 默认处置强度（strict / standard / lenient / log_only） |
+| `llm_provider_id` | 空 | **审核使用的模型**；留空=跟随会话默认模型，可在「策略」页下拉选择 |
 | `allow_without_full_msg` | false | 是否允许在未开启「接收全部消息」时启用审核（不建议） |
-| `sample_rate` | 1.0 | 送审比例（M2） |
+| `sample_rate` | 1.0 | 送审比例 |
 | `llm_min_confidence` | 0.7 | 判定置信度门槛（M2） |
 | `mute_steps` | 3→10 分钟 / 4→1 小时 / 5→1 天 | 按严重度禁言时长（M2） |
 | `retention_events_days` | 30 | 审核事件/动作保留天数 |
@@ -67,7 +68,7 @@
 
 | 视图 | 内容 |
 | --- | --- |
-| 策略 → 运行参数 | dry-run、模式（strict/standard/lenient/log_only）、置信度门槛、采样率、送审条件、超时、单群 QPM、全局并发、日预算、缓存、熔断阈值、最长禁言、重复违规累加、通知会话 |
+| 策略 → 运行参数 | dry-run、模式（strict/standard/lenient/log_only）、**审核模型**、置信度门槛、采样率、送审条件、超时、单群 QPM、全局并发、日预算、缓存、熔断阈值、最长禁言、重复违规累加、通知会话 |
 | 策略 → 处置矩阵 | verdict=violation 时按 severity(1-5) 勾选动作：警告 / 撤回 / 禁言 / 上报 / 拉黑 / 移除；lenient 模式只保留警告与上报 |
 | 策略 → 提示词 | 自定义 system 提示词与 user 模板（支持占位符），留空使用内置默认 |
 | 策略 → 试跑 | 粘贴一段文本，完整走「规则 → LLM → 动作规划」但不执行任何动作 |

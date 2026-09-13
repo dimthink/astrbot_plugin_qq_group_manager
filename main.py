@@ -77,7 +77,7 @@ from .src.models import (
     CapabilityResult,
     Verdict,
 )
-from .src.moderator import LLMModerator, ModerationRequest
+from .src.moderator import LLMModerator, ModerationRequest, choose_provider_id
 from .src.policy import ApprovalPolicyService
 from .src.rules import RuleEngine
 from .src.scheduler import TaskScheduler, TaskSpec
@@ -94,7 +94,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -123,6 +123,7 @@ class QQGroupManager(Star):
         self._platform_id: str = ""
         self._last_prune_day: str = ""
         self._seen_messages: dict[str, float] = {}
+        self._last_provider_id: str = ""
         WebApi(self).register()
 
     # ------------------------------------------------------------------
@@ -380,12 +381,59 @@ class QQGroupManager(Star):
             "groups_total": len(groups),
             "groups_moderating": len(enabled),
             "join_review_mode": settings.get("join_review_mode"),
+            "moderation_provider": {
+                "configured": str(settings.get("llm_provider_id") or ""),
+                "last_used": self._last_provider_id,
+            },
             "db_queue": dict(self.audit.stats) if self.audit else {},
             "sse_subscribers": self.bus.subscriber_count(),
             "moderator": self.moderator.status(),
             "actions": self.actions.status(),
             "joins": self.joins.status(),
             "now": to_iso(),
+        }
+
+    def available_provider_ids(self) -> list[str]:
+        """当前可用的对话模型 ID 列表（供审核模型选择与校验）。"""
+        ids: list[str] = []
+        try:
+            providers = self.context.get_all_providers() or []
+        except Exception:  # pragma: no cover - 运行环境异常时退化为空列表
+            providers = []
+        for provider in providers:
+            try:
+                meta = provider.meta()
+            except Exception:
+                continue
+            provider_id = str(getattr(meta, "id", "") or "")
+            if provider_id:
+                ids.append(provider_id)
+        return ids
+
+    def list_providers(self) -> dict[str, Any]:
+        """列出可用于内容审核的对话模型（WebUI 选择用）。"""
+        items: list[dict[str, str]] = []
+        try:
+            providers = self.context.get_all_providers() or []
+        except Exception:  # pragma: no cover
+            providers = []
+        for provider in providers:
+            try:
+                meta = provider.meta()
+            except Exception:
+                continue
+            items.append(
+                {
+                    "id": str(getattr(meta, "id", "") or ""),
+                    "model": str(getattr(meta, "model", "") or ""),
+                    "type": str(getattr(meta, "type", "") or ""),
+                }
+            )
+        configured = str(self.store.get_setting("llm_provider_id") or "")
+        return {
+            "items": items,
+            "configured": configured,
+            "last_used": self._last_provider_id,
         }
 
     def groups_snapshot(self) -> list[dict[str, Any]]:
@@ -492,11 +540,21 @@ class QQGroupManager(Star):
     ) -> str:
         """调用 AstrBot 已配置的 LLM（复用官方 SDK）。"""
         umo = request.umo or str(self.store.get_setting("notify_session") or "")
-        provider_id = ""
+        session_default = ""
         try:
-            provider_id = await self.context.get_current_chat_provider_id(umo=umo or None)
+            session_default = await self.context.get_current_chat_provider_id(umo=umo or None)
         except Exception:
-            provider_id = ""
+            session_default = ""
+        available = self.available_provider_ids()
+        configured = str(self.store.get_setting("llm_provider_id") or "")
+        provider_id = choose_provider_id(configured, session_default, available)
+        if configured and provider_id != configured:
+            self.logger.warning(
+                "配置的审核模型 %s 当前不可用，已回退到 %s",
+                configured,
+                provider_id or "会话默认模型",
+            )
+        self._last_provider_id = provider_id
         if provider_id:
             response = await self.context.llm_generate(
                 chat_provider_id=provider_id,
@@ -842,7 +900,7 @@ class QQGroupManager(Star):
             hard_actions=hard_actions,
             source=verdict.source,
             umo=event.unified_msg_origin,
-            provider_id=str(settings.get("llm_provider_id") or ""),
+            provider_id=self._last_provider_id,
             latency_ms=latency_ms,
             sampled=sampled,
             send=_send,

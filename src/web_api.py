@@ -202,6 +202,7 @@ class WebApi:
                 "keywords": store.keywords(),
                 "ui_state": store.ui_state(),
                 "runtime": self.service.runtime_status(),
+                "providers": self.service.list_providers(),
                 "options": {
                     "modes": list(MODERATION_MODES),
                     "join_modes": list(JOIN_REVIEW_MODES),

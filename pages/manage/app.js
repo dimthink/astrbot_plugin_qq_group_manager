@@ -173,6 +173,11 @@ async function viewDashboard(root) {
     el('div', { class: 'grid cols-4' }, [
       statCard('平台通道', runtime.transport && runtime.transport.available ? '可用' : '不可用'),
       statCard('群数量', runtime.groups_total || 0, '审核中 ' + (runtime.groups_moderating || 0)),
+      statCard(
+        '审核模型',
+        (config.providers && (config.providers.last_used || config.providers.configured)) || '跟随会话默认',
+        '可在「策略」页切换'
+      ),
       statCard('今日审核', stats.events_total || 0, '违规 ' + (verdicts.violation || 0) + ' / 可疑 ' + (verdicts.review || 0)),
       statCard('今日处置', actionTotal, '失败 ' + Object.keys(actions).reduce((acc, k) => acc + (actions[k].fail || 0), 0)),
     ]),
@@ -683,6 +688,22 @@ async function viewPolicy(root) {
   (options.modes || []).forEach((mode) => {
     modeSelect.appendChild(el('option', { value: mode, text: mode, selected: mode === settings.mode ? 'selected' : null }));
   });
+  const providerInfo = config.providers || {};
+  const providerSelect = el('select');
+  providerSelect.appendChild(el('option', { value: '', text: '跟随会话默认模型' }));
+  (providerInfo.items || []).forEach((item) => {
+    const label = (item.model || item.id) + (item.type ? '（' + item.type + '）' : '');
+    providerSelect.appendChild(el('option', {
+      value: item.id,
+      text: label,
+      selected: item.id === settings.llm_provider_id ? 'selected' : null,
+    }));
+  });
+  const providerHint = el('p', {
+    class: 'card-desc',
+    text: '当前生效的审核模型：' + (providerInfo.last_used || providerInfo.configured || '跟随会话默认模型')
+      + '；选择「跟随会话默认模型」时，审核会使用 AstrBot 中该会话选定的对话模型。',
+  });
   const minConf = numField('LLM 置信度门槛', settings.llm_min_confidence, 0, 1, 0.05);
   const sampleRate = numField('送审采样率', settings.sample_rate, 0, 1, 0.05);
   const timeoutField = numField('单次超时（秒）', settings.llm_timeout, 5, 120, 1);
@@ -749,6 +770,7 @@ async function viewPolicy(root) {
       auto_blacklist: autoBlacklist.input.checked,
       auto_remove: autoRemove.input.checked,
       mode: modeSelect.value,
+      llm_provider_id: providerSelect.value,
       llm_min_confidence: Number(minConf.input.value),
       sample_rate: Number(sampleRate.input.value),
       llm_timeout: Number(timeoutField.input.value),
@@ -792,10 +814,12 @@ async function viewPolicy(root) {
     el('div', { class: 'row' }, [dryRun.node, allowNoFull.node, blockLlm.node]),
     el('div', { class: 'row' }, [
       el('label', { class: 'field' }, [el('span', { text: '默认模式' }), modeSelect]),
+      el('label', { class: 'field' }, [el('span', { text: '审核模型' }), providerSelect]),
       minConf.node, sampleRate.node, timeoutField.node,
     ]),
     el('div', { class: 'row' }, [qpmField.node, concurrency.node, budget.node, cacheTtl.node, breaker.node]),
     el('div', { class: 'row' }, [maxMuteDays.node, repeatMul.node, autoBlacklist.node, autoRemove.node]),
+    providerHint,
     el('label', { class: 'field' }, [el('span', { text: '管理员通知会话（umo）' }), notifySession]),
     el('div', { class: 'field-actions' }, [el('span', { class: 'muted', text: '送审条件：' })]),
     conditions,

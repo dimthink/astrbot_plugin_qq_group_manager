@@ -170,3 +170,43 @@ def test_unavailable_provider_is_safe():
     verdict = run(moderator.judge(ModerationRequest(group_id="g1", text="hi")))
     assert verdict.verdict == "review"
     assert moderator.available() is False
+
+
+def test_choose_provider_id_prefers_configured():
+    from src.moderator import choose_provider_id
+
+    # 未配置 → 用会话默认
+    assert choose_provider_id("", "session-provider") == "session-provider"
+    # 配置了且存在 → 用配置的
+    assert (
+        choose_provider_id("mod-provider", "session-provider", ["mod-provider", "x"])
+        == "mod-provider"
+    )
+    # 配置的已不存在 → 回退会话默认
+    assert (
+        choose_provider_id("gone", "session-provider", ["session-provider"]) == "session-provider"
+    )
+    # 无法枚举模型（老版本）时信任配置值
+    assert choose_provider_id("mod-provider", "", []) == "mod-provider"
+    # 两者都为空 → 空串（由调用方走 get_using_provider_async 兜底）
+    assert choose_provider_id("", "", []) == ""
+
+
+def test_llm_provider_id_is_editable_and_persisted():
+    import asyncio
+
+    from src.store import PluginStore, normalize_settings
+    from tests.fakes import FakeKV
+
+    assert normalize_settings({"llm_provider_id": "abc"})["llm_provider_id"] == "abc"
+    assert normalize_settings({})["llm_provider_id"] == ""
+
+    async def scenario():
+        kv = FakeKV()
+        store = PluginStore(kv)
+        await store.load()
+        updated = await store.update_settings({"llm_provider_id": "mod-provider"})
+        assert updated["llm_provider_id"] == "mod-provider"
+        assert kv.data["settings"]["llm_provider_id"] == "mod-provider"
+
+    asyncio.run(scenario())

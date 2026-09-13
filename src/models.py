@@ -298,6 +298,7 @@ def default_settings() -> dict[str, Any]:
         "llm_qpm_per_group": 20,
         "llm_max_concurrency": 4,
         "llm_daily_budget": 0,
+        "llm_provider_id": "",
         "cache_ttl": 600,
         "circuit_break_threshold": 5,
         "block_llm_on_violation": False,
