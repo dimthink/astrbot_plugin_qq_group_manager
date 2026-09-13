@@ -266,6 +266,9 @@ class ActionExecutor:
             self.stats["skipped"] += 1
             return ActionResult(action=action, ok=True, message="重复推送，已跳过")
         dry_run = bool(self.api.dry_run()) if self.api is not None else True
+        # dry-run 只拦截"破坏性动作"（撤回/禁言/拉黑/移除）；警告与上报是给用户/管理员的
+        # 反馈，默认照常执行，否则 dry-run 期间使用者会误以为插件没工作。
+        dry_run_warn = bool(settings.get("dry_run_warn", True))
 
         try:
             if action == "warn":
@@ -274,7 +277,7 @@ class ActionExecutor:
                     group_id=group_id,
                     sender_name=sender_name,
                     verdict=verdict,
-                    dry_run=dry_run,
+                    dry_run=dry_run and not dry_run_warn,
                 )
             if action == "recall":
                 return await self._recall(group_id, msg_id, config, dry_run)
@@ -296,6 +299,7 @@ class ActionExecutor:
                     msg_id=msg_id,
                     umo=umo,
                     dry_run=dry_run,
+                    dry_run_warn=dry_run_warn,
                 )
         except Exception as exc:  # pragma: no cover - 单个动作失败不影响其它动作
             self.stats["failed"] += 1
@@ -450,6 +454,7 @@ class ActionExecutor:
         msg_id: str,
         umo: str,
         dry_run: bool,
+        dry_run_warn: bool = True,
     ) -> ActionResult:
         payload = {
             "group_id": group_id,
@@ -467,7 +472,7 @@ class ActionExecutor:
         if self.notifier is None:
             self.stats["skipped"] += 1
             return ActionResult(action="report", ok=True, message="未配置通知会话，仅记录审计")
-        if dry_run:
+        if dry_run and not dry_run_warn:
             self.stats["executed"] += 1
             return ActionResult(
                 action="report", ok=True, dry_run=True, message="dry-run：未实际通知"

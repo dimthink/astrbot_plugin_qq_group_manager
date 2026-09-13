@@ -281,7 +281,7 @@ async function viewDashboard(root) {
   ]));
 
   if (runtime.dry_run) {
-    root.appendChild(notice('当前处于 dry-run：所有处置动作只会写入审计日志，不会真正撤回或禁言。', 'warn'));
+    root.appendChild(notice('当前处于 dry-run：撤回 / 禁言 / 拉黑 / 移除只写入审计日志不会执行；警告与上报仍会真实发送（可在「策略」页用 dry_run_warn 关闭）。', 'warn'));
   }
   if (!(runtime.transport && runtime.transport.available)) {
     root.appendChild(notice('未检测到 qq_official 平台通道：请在 AstrBot 中启用 QQ 官方机器人适配器，并让机器人在群里收到一条消息后重试。', 'bad'));
@@ -749,7 +749,8 @@ async function viewPolicy(root) {
   clear(root);
 
   /* 运行参数 */
-  const dryRun = checkField('dry-run（只记录不处置）', settings.dry_run);
+  const dryRun = checkField('dry-run（不做撤回/禁言等实际处置，仍会发警告）', settings.dry_run);
+  const dryRunWarn = checkField('dry-run 期间仍然发送警告与上报', settings.dry_run_warn !== false);
   const allowNoFull = checkField('允许未开启「接收全部消息」时启用审核（不建议）', settings.allow_without_full_msg);
   const blockLlm = checkField('违规消息阻断后续 LLM 对话', settings.block_llm_on_violation);
   const repeatMul = checkField('重复违规时长累加（≤3 倍）', settings.repeat_offense_multiplier);
@@ -835,6 +836,7 @@ async function viewPolicy(root) {
     });
     const payload = {
       dry_run: dryRun.input.checked,
+      dry_run_warn: dryRunWarn.input.checked,
       allow_without_full_msg: allowNoFull.input.checked,
       block_llm_on_violation: blockLlm.input.checked,
       repeat_offense_multiplier: repeatMul.input.checked,
@@ -882,7 +884,7 @@ async function viewPolicy(root) {
   } });
 
   root.appendChild(card('运行参数', '首次安装默认 dry-run + lenient；确认判定质量后再关闭 dry-run 并切到标准档。', [
-    el('div', { class: 'row' }, [dryRun.node, allowNoFull.node, blockLlm.node]),
+    el('div', { class: 'row' }, [dryRun.node, dryRunWarn.node, allowNoFull.node, blockLlm.node]),
     el('div', { class: 'row' }, [
       el('label', { class: 'field' }, [el('span', { text: '默认模式' }), modeSelect]),
       el('label', { class: 'field' }, [el('span', { text: '审核模型' }), providerSelect]),

@@ -288,6 +288,7 @@ def default_settings() -> dict[str, Any]:
     return {
         "enabled": True,
         "dry_run": True,
+        "dry_run_warn": True,
         "default_moderation_enabled": False,
         "allow_without_full_msg": False,
         "mode": "lenient",

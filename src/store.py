@@ -77,6 +77,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     for key in (
         "enabled",
         "dry_run",
+        "dry_run_warn",
         "default_moderation_enabled",
         "allow_without_full_msg",
         "block_llm_on_violation",
@@ -365,6 +366,8 @@ class PluginStore:
         entry = cache.setdefault(member_openid, {})
         if name:
             entry["name"] = name
+        # 首次见到即记录 first_seen，用于"入群时长/新成员"判定
+        entry.setdefault("first_seen", now)
         entry["seen_unix"] = now
         if role:
             self._role_cache.setdefault(group_id, {})[member_openid] = {
@@ -377,6 +380,15 @@ class PluginStore:
             for key, _ in oldest[: len(cache) - MEMBER_CACHE_PER_GROUP]:
                 cache.pop(key, None)
         self._dirty.add(KEY_MEMBER_CACHE)
+
+    def member_first_seen(self, group_id: str, member_openid: str) -> int | None:
+        """该成员在本群首次被看到的时间戳（未知时返回 None）。"""
+        entry = self._member_cache.get(group_id, {}).get(member_openid, {})
+        value = entry.get("first_seen")
+        try:
+            return int(value) if value else None
+        except (TypeError, ValueError):
+            return None
 
     def member_name(self, group_id: str, member_openid: str) -> str:
         entry = self._member_cache.get(group_id, {}).get(member_openid, {})
