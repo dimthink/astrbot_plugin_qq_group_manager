@@ -31,6 +31,7 @@ from .src.commands import (
     APPEAL_COMMANDS,
     BLACKLIST_COMMANDS,
     CONFIG_COMMANDS,
+    DRYRUN_COMMANDS,
     FULL_MSG_GUIDE,
     GROUP_ADMIN_COMMANDS,
     INFO_COMMANDS,
@@ -94,7 +95,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -1061,6 +1062,8 @@ class QQGroupManager(Star):
             )
         if name in BLACKLIST_COMMANDS:
             return await self._cmd_blacklist(event, group_id, args)
+        if name in DRYRUN_COMMANDS:
+            return await self._cmd_dry_run(args)
         return []
 
     async def _cmd_group_info(self, group_id: str) -> str:
@@ -1392,6 +1395,37 @@ class QQGroupManager(Star):
                 name=str(request.get("username") or "该申请人"),
             )
         ]
+
+    async def _cmd_dry_run(self, args: list[str]) -> list[str]:
+        """查看/切换 dry-run（实际处置开关）。"""
+        if not args:
+            current = self.store.dry_run()
+            return [
+                "当前运行模式："
+                + (
+                    "dry-run（只记录 + 警告，不撤回/禁言）"
+                    if current
+                    else "实际处置（撤回/禁言会真实执行）"
+                )
+                + "\n用法：dry-run 关闭 / dry-run 开启 / dry-run"
+            ]
+        token = args[0].strip().lower()
+        if token in ("关闭", "off", "disable", "0", "false", "实际", "真实"):
+            settings = await self.store.update_settings({"dry_run": False})
+            self.logger.warning("dry-run 已关闭，实际处置生效（by=command）")
+            return [
+                "已关闭 dry-run：命中规则的撤回/禁言会**真实执行**（当前模式："
+                + str(settings.get("mode"))
+                + "）。如需回退请发送「dry-run 开启」。"
+            ]
+        if token in ("开启", "on", "enable", "1", "true", "演练"):
+            settings = await self.store.update_settings({"dry_run": True})
+            self.logger.warning("dry-run 已开启，实际处置停止（by=command）")
+            return [
+                "已开启 dry-run：只记录与警告，不会撤回或禁言。当前模式："
+                + str(settings.get("mode"))
+            ]
+        return ["用法：dry-run 关闭 / dry-run 开启 / dry-run"]
 
     async def _cmd_blacklist(
         self, event: AstrMessageEvent, group_id: str, args: list[str]

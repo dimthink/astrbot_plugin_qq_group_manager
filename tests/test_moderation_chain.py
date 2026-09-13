@@ -302,3 +302,49 @@ def test_store_tracks_member_first_seen():
         assert store.member_name("g1", "u1") == "小号二号"
 
     asyncio.run(scenario())
+
+
+def test_lenient_mode_filters_recall_and_explains(tmp_path):
+    """lenient 模式下即使 dry-run 关闭，也只警告，并在文案中说明原因。"""
+
+    async def scenario():
+        chain = await run_chain(tmp_path, mode="lenient", dry_run=False)
+        assert chain.transport.calls_for("DELETE", RECALL_PATH) == []
+        assert chain.transport.calls_for("POST", MUTE_PATH) == []
+        assert len(chain.event.sent) == 1
+        chunks = chain.event.sent[0].chain if hasattr(chain.event.sent[0], "chain") else []
+        text = "".join(getattr(item, "text", "") for item in chunks)
+        assert "宽松模式只警告不撤回/禁言" in text
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_standard_mode_with_dry_run_explains_limitation(tmp_path):
+    async def scenario():
+        chain = await run_chain(tmp_path, mode="standard", dry_run=True)
+        assert len(chain.event.sent) == 1
+        chunks = chain.event.sent[0].chain if hasattr(chain.event.sent[0], "chain") else []
+        text = "".join(getattr(item, "text", "") for item in chunks)
+        assert "dry-run" in text
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_dry_run_command_toggles_setting(tmp_path):
+    async def scenario():
+        chain = await run_chain(tmp_path)
+        service = chain.service
+        main = load_main()
+        off = await main.QQGroupManager._cmd_dry_run(service, ["关闭"])
+        assert service.store.dry_run() is False
+        assert "真实执行" in off[0]
+        on = await main.QQGroupManager._cmd_dry_run(service, ["开启"])
+        assert service.store.dry_run() is True
+        assert "不会撤回或禁言" in on[0]
+        status = await main.QQGroupManager._cmd_dry_run(service, [])
+        assert "dry-run" in status[0]
+        await chain.close()
+
+    asyncio.run(scenario())

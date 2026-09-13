@@ -168,6 +168,7 @@ class ActionExecutor:
         """记录审核事件并按矩阵执行动作，返回执行摘要。"""
         mode = str(config.mode or settings.get("mode") or "standard")
         actions = self.plan_actions(verdict=verdict, settings=settings, hard_actions=hard_actions)
+        planned = list(actions)
         if mode == "log_only":
             actions = []
         elif mode == "lenient":
@@ -179,6 +180,41 @@ class ActionExecutor:
             actions = filtered
         if verdict.verdict == "allow":
             actions = []
+
+        dry_run_now = bool(self.api.dry_run()) if self.api is not None else True
+        destructive_planned = [
+            action for action in planned if action in ("recall", "mute", "blacklist", "remove")
+        ]
+        capability_ok = True
+        if "recall" in destructive_planned and not config.capability_ok(CAP_RECALL):
+            capability_ok = False
+        if "mute" in destructive_planned and not config.capability_ok(CAP_MUTE):
+            capability_ok = False
+        # 违规但破坏性动作被 dry-run / 能力限制拦下时，至少要有一条警告，
+        # 否则群内完全看不到反馈（使用者会以为插件没工作）。
+        if (
+            verdict.is_violation
+            and "warn" not in actions
+            and settings.get("dry_run_warn", True)
+            and destructive_planned
+            and (dry_run_now or not capability_ok)
+        ):
+            actions.insert(0, "warn")
+
+        # 把"被判违规但动作被模式/dry-run 拦下"这件事写清楚，避免使用者以为插件没工作
+        limited = [action for action in planned if action not in actions]
+        notes: list[str] = []
+        if mode == "lenient":
+            notes.append("宽松模式只警告不撤回/禁言")
+        elif mode == "log_only":
+            notes.append("仅记录模式不执行任何处置")
+        if dry_run_now:
+            notes.append("dry-run 只警告、不实际处置")
+        limited_note = ("（" + "；".join(notes) + "）") if notes else ""
+        if limited and self.logger is not None:
+            self.logger.info(
+                "以下动作未执行：%s（模式=%s，dry_run=%s）", limited, mode, dry_run_now
+            )
 
         event_id: int | None = None
         if self.audit is not None:
@@ -221,6 +257,7 @@ class ActionExecutor:
                 multiplier=multiplier,
                 send=send,
                 umo=umo,
+                note=limited_note,
             )
             results.append(result)
             if self.audit is not None:
@@ -261,6 +298,7 @@ class ActionExecutor:
         multiplier: int,
         send: Callable[[str], Awaitable[None]] | None,
         umo: str,
+        note: str = "",
     ) -> ActionResult:
         if self._seen(group_id, msg_id, action):
             self.stats["skipped"] += 1
@@ -278,6 +316,7 @@ class ActionExecutor:
                     sender_name=sender_name,
                     verdict=verdict,
                     dry_run=dry_run and not dry_run_warn,
+                    note=note,
                 )
             if action == "recall":
                 return await self._recall(group_id, msg_id, config, dry_run)
@@ -317,6 +356,7 @@ class ActionExecutor:
         sender_name: str,
         verdict: Verdict,
         dry_run: bool,
+        note: str = "",
     ) -> ActionResult:
         if send is None:
             self.stats["skipped"] += 1
@@ -326,6 +366,8 @@ class ActionExecutor:
         text = WARN_TEMPLATE.format(
             name=sender_name or "该成员", category=verdict.category or "其他"
         )
+        if note:
+            text += note
         if dry_run:
             self.stats["executed"] += 1
             return ActionResult(action="warn", ok=True, dry_run=True, message="dry-run：未实际发送")

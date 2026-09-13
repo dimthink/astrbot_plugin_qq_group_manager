@@ -43,6 +43,7 @@ JOIN_LIST_COMMANDS = ("入群申请",)
 JOIN_APPROVE_COMMANDS = ("入群通过",)
 JOIN_DECLINE_COMMANDS = ("入群拒绝",)
 BLACKLIST_COMMANDS = ("黑名单",)
+DRYRUN_COMMANDS = ("dry-run", "dryrun", "演练模式", "DryRun")
 
 #: 需要群管理员权限的指令（AstrBot 管理员同样可用）
 GROUP_ADMIN_COMMANDS: tuple[str, ...] = (
@@ -61,6 +62,7 @@ GROUP_ADMIN_COMMANDS: tuple[str, ...] = (
     *JOIN_APPROVE_COMMANDS,
     *JOIN_DECLINE_COMMANDS,
     *BLACKLIST_COMMANDS,
+    *DRYRUN_COMMANDS,
 )
 
 #: 仅 AstrBot 管理员可用
@@ -137,6 +139,7 @@ def menu_text() -> str:
         "• 入群审核 开启/关闭/模式 <模式> · 入群申请\n"
         "• 入群通过 <序号> · 入群拒绝 <序号> [理由]\n"
         "• 黑名单 添加/移除/列表\n"
+        "• dry-run ─ 查看当前运行模式；dry-run 关闭/开启 ─ 切换实际处置\n"
         "──────────────\n"
         "AstrBot 管理员\n"
         "• 群管理自检 ─ 平台能力探测\n"
