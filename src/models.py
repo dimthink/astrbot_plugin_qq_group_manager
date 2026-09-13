@@ -84,6 +84,8 @@ JOIN_REVIEW_MODES: tuple[str, ...] = ("off", "strict", "standard", "human")
 
 IMAGE_REVIEW_MODES: tuple[str, ...] = ("off", "with_text", "always")
 
+RISK_CONDITION_PREFIX = "risk>="
+
 SEND_CONDITIONS: tuple[str, ...] = (
     "rule_hit",
     "has_link",
@@ -295,7 +297,16 @@ def default_settings() -> dict[str, Any]:
         "allow_without_full_msg": False,
         "mode": "lenient",
         "sample_rate": 1.0,
-        "send_conditions": ["rule_hit"],
+        "send_conditions": ["rule_hit", "risk>=60"],
+        "risk_send_threshold": 60,
+        "normalize_enabled": True,
+        "homoglyph_enabled": True,
+        "template_enabled": True,
+        "pinyin_enabled": False,
+        "fuzzy_max_distance": 1,
+        "auto_enforce_normalized": False,
+        "duplicate_flood_window": 300,
+        "duplicate_flood_members": 3,
         "llm_min_confidence": 0.7,
         "llm_timeout": 20,
         "llm_qpm_per_group": 20,
@@ -366,6 +377,10 @@ NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
     "audit_queue_maxsize": (100, 100_000),
     "flood_threshold": (0, 100),
     "image_review_max": (1, 4),
+    "risk_send_threshold": (0, 100),
+    "fuzzy_max_distance": (0, 3),
+    "duplicate_flood_window": (30, 3600),
+    "duplicate_flood_members": (2, 20),
     "probe_full_msg_interval": (300, 86400),
     "capability_log_dedupe_window": (0, 86400),
 }

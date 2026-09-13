@@ -28,6 +28,7 @@ const VIEWS = [
   { id: 'tools', label: '工具', icon: '🧰' },
   { id: 'policy', label: '策略', icon: '⚙️' },
   { id: 'keywords', label: '关键词', icon: '🔤' },
+  { id: 'rulesx', label: '规则增强', icon: '🧬' },
   { id: 'members', label: '成员与禁言', icon: '🚫' },
   { id: 'joins', label: '入群审批', icon: '🚪' },
 ];
@@ -733,6 +734,7 @@ async function viewTools(root) {
 /* ----------------------------------------------------------- 策略视图 */
 
 const MATRIX_ACTIONS = ['warn', 'recall', 'mute', 'report', 'blacklist', 'remove'];
+const RULE_TYPES = ['normalized', 'literal', 'regex', 'fuzzy', 'pinyin'];
 const ACTION_LABELS = {
   warn: '警告',
   recall: '撤回',
@@ -744,10 +746,22 @@ const ACTION_LABELS = {
 const CONDITION_LABELS = {
   rule_hit: '规则命中',
   has_link: '含链接',
+  has_contact: '疑似联系方式',
+  ad_template: '命中广告模板',
+  has_image: '含图片',
   long_text: '长文本',
   new_member: '新成员',
   flood: '刷屏',
   all: '全部消息',
+};
+
+const RULE_TYPE_LABELS = {
+  normalized: '关键词(归一化)',
+  literal: '精确关键词',
+  regex: '正则',
+  fuzzy: '模糊匹配',
+  pinyin: '同音匹配',
+  template: '模板',
 };
 
 function numField(label, value, min, max, step) {
@@ -833,6 +847,25 @@ async function viewPolicy(root) {
     box.dataset.key = key;
     conditions.appendChild(el('label', { class: 'switch' }, [box, el('span', { text: CONDITION_LABELS[key] })]));
   });
+  const riskBox = el('input', { type: 'checkbox' });
+  riskBox.checked = (settings.send_conditions || []).some((item) => String(item).indexOf('risk>=') === 0);
+  riskBox.dataset.key = '__risk__';
+  conditions.appendChild(el('label', { class: 'switch' }, [riskBox, el('span', { text: '本地风险分达到阈值' })]));
+  const riskField = numField('风险分阈值（达到即送审）', settings.risk_send_threshold || 60, 10, 100, 5);
+
+  /* 规则增强参数 */
+  const normalizeOn = checkField('启用文本归一化（识别形近字/插符号/全角变体）', settings.normalize_enabled !== false);
+  const homoglyphOn = checkField('启用形近字表', settings.homoglyph_enabled !== false);
+  const templateOn = checkField('启用广告模板（动作词 × 诱饵词）', settings.template_enabled !== false);
+  const pinyinOn = checkField('启用同音匹配（需已安装 pypinyin）', settings.pinyin_enabled);
+  const fuzzyDist = numField('模糊匹配编辑距离（0=关闭）', settings.fuzzy_max_distance, 0, 3, 1);
+  const autoEnforce = checkField('归一化/模板命中直接按规则动作处置（默认关：先送审）', settings.auto_enforce_normalized);
+  const dupWindow = numField('同文案多号刷屏窗口（秒）', settings.duplicate_flood_window || 300, 30, 3600, 30);
+  const dupMembers = numField('同文案多号刷屏人数阈值', settings.duplicate_flood_members || 3, 2, 20, 1);
+  const pinyinHint = el('p', {
+    class: 'card-desc',
+    text: '同音匹配依赖可选的 pypinyin 库；未安装时该项自动失效（不影响其他规则）。',
+  });
 
   /* 处置矩阵 */
   const matrix = JSON.parse(JSON.stringify(settings.action_matrix || { violation: {} }));
@@ -896,7 +929,19 @@ async function viewPolicy(root) {
       max_mute_days: Number(maxMuteDays.input.value),
       notify_session: notifySession.value.trim(),
       action_matrix: { violation: matrixPayload },
-      send_conditions: Array.from(conditions.querySelectorAll('input')).filter((box) => box.checked).map((box) => box.dataset.key),
+      send_conditions: Array.from(conditions.querySelectorAll('input'))
+        .filter((box) => box.checked && box.dataset.key !== '__risk__')
+        .map((box) => box.dataset.key)
+        .concat(riskBox.checked ? ['risk>=' + String(riskField.input.value)] : []),
+      risk_send_threshold: Number(riskField.input.value),
+      normalize_enabled: normalizeOn.input.checked,
+      homoglyph_enabled: homoglyphOn.input.checked,
+      template_enabled: templateOn.input.checked,
+      pinyin_enabled: pinyinOn.input.checked,
+      fuzzy_max_distance: Number(fuzzyDist.input.value),
+      auto_enforce_normalized: autoEnforce.input.checked,
+      duplicate_flood_window: Number(dupWindow.input.value),
+      duplicate_flood_members: Number(dupMembers.input.value),
       prompt_system: systemPrompt.value,
       prompt_user: userPrompt.value,
     };
@@ -923,6 +968,14 @@ async function viewPolicy(root) {
       dryOut.textContent = '试跑失败：' + error.message;
     } finally { dryBtn.disabled = false; }
   } });
+
+  root.appendChild(card('规则增强（变体识别 / 风险分）',
+    '归一化让规则"看得见"形近字、插符号、全角与拼音变体；风险分把多个弱信号累加，达到阈值即送审（不影响纯闲聊）。', [
+    el('div', { class: 'row' }, [normalizeOn.node, homoglyphOn.node, templateOn.node, pinyinOn.node]),
+    el('div', { class: 'row' }, [fuzzyDist.node, riskField.node, dupWindow.node, dupMembers.node]),
+    el('div', { class: 'row' }, [autoEnforce.node]),
+    pinyinHint,
+  ]));
 
   root.appendChild(card('运行参数', '首次安装默认 dry-run + lenient；确认判定质量后再关闭 dry-run 并切到标准档。', [
     el('div', { class: 'row' }, [dryRun.node, dryRunWarn.node, allowNoFull.node, blockLlm.node]),
@@ -970,7 +1023,11 @@ async function viewKeywords(root) {
   });
 
   const typeSelect = el('select');
-  [['literal', '关键词（包含匹配）'], ['regex', '正则表达式']].forEach((pair) => {
+  [['normalized', '关键词（推荐：自动识别形近字/插符号变体）'],
+   ['literal', '精确关键词（只匹配原样文字）'],
+   ['regex', '正则表达式'],
+   ['fuzzy', '模糊匹配（允许少量错别字）'],
+   ['pinyin', '同音匹配（需已安装 pypinyin）']].forEach((pair) => {
     typeSelect.appendChild(el('option', { value: pair[0], text: pair[1] }));
   });
   const bucketSelect = el('select');
@@ -1055,7 +1112,7 @@ async function viewKeywords(root) {
       } });
       tbody.appendChild(el('tr', {}, [
         el('td', {}, [toggle]),
-        el('td', { text: item.type === 'regex' ? '正则' : '关键词' }),
+        el('td', { text: RULE_TYPE_LABELS[item.type || 'literal'] || (item.type || 'literal') }),
         el('td', { class: 'mono', text: item.pattern }),
         el('td', { text: (item.action || []).map((action) => ACTION_LABELS[action] || action).join('、') || '—' }),
         el('td', { text: String(item.scope || 'all') === 'all' ? '全局' : shortId(item.scope) }),
@@ -1076,6 +1133,115 @@ async function viewKeywords(root) {
     testText,
     el('div', { class: 'field-actions' }, [testBtn]),
     testOut,
+  ]));
+}
+
+/* ----------------------------------------------------- 规则增强视图 */
+
+async function viewRulesX(root) {
+  const config = await loadConfig();
+  const templates = JSON.parse(JSON.stringify(config.templates || []));
+  const homoglyph = Object.assign({}, config.homoglyph || {});
+  clear(root);
+
+  root.appendChild(notice('这里维护"变体识别"的两块数据：广告模板（动作词 × 诱饵词）与形近字表；'
+    + '规则引擎保存后立即生效（无需重载插件）。', 'ok'));
+
+  /* 命中测试 */
+  const testText = el('input', { type: 'text', placeholder: '输入消息测试判定，例如：珈裙苓资料123456' });
+  const testOut = el('pre', { class: 'mono out' });
+  const testBtn = el('button', { class: 'btn', text: '测试判定', onclick: async () => {
+    testBtn.disabled = true;
+    try {
+      const result = await bridge.apiPost('rules/test', { text: testText.value });
+      const lines = [];
+      lines.push('是否送审 LLM：' + (result.should_send ? '是' : '否'));
+      lines.push('本地风险分：' + String(result.score) + ' / 100');
+      const views = result.views || {};
+      lines.push('原文 view    ：' + (views.raw || ''));
+      lines.push('compact 视图 ：' + (views.compact || ''));
+      lines.push('骨架视图     ：' + (views.skeleton || ''));
+      if (views.pinyin) lines.push('拼音视图     ：' + views.pinyin);
+      const signals = result.signals || {};
+      lines.push('风险信号     ：' + (Object.keys(signals).length
+        ? Object.keys(signals).map((key) => key + '(+' + signals[key] + ')').join('、') : '无'));
+      (result.hits || []).forEach((hit) => {
+        lines.push('命中：[' + (RULE_TYPE_LABELS[hit.rule_type] || hit.rule_type) + '] '
+          + hit.pattern + ' → 动作 ' + ((hit.actions || []).join('、') || '无')
+          + (hit.enforce ? '（直接处置）' : '（仅送审）'));
+      });
+      if (!(result.hits || []).length) lines.push('命中：无');
+      testOut.textContent = lines.join('\n');
+    } catch (error) { testOut.textContent = '测试失败：' + (error && error.message ? error.message : error); }
+    finally { testBtn.disabled = false; }
+  } });
+
+  root.appendChild(card('判定测试', '展示三个归一化视图、命中依据与风险分明细，用来判断某条消息为什么被/不被送审。', [
+    el('div', { class: 'row' }, [testText, el('div', { class: 'field-actions' }, [testBtn])]),
+    testOut,
+  ]));
+
+  /* 广告模板 */
+  const tplArea = el('textarea', { rows: '14', class: 'mono' });
+  tplArea.value = JSON.stringify(templates, null, 2);
+  const tplStatus = el('p', { class: 'card-desc', text: templates.length
+    ? '当前有 ' + templates.length + ' 条自定义模板；留空数组 [] 表示关闭模板规则（回退到仅规则匹配）。'
+    : '当前未自定义模板：引擎使用内置模板（拉群引流 / 私聊引流 / 兼职刷单 / 赌博引流 / 涉黄引流）。' });
+  const tplSave = el('button', { class: 'btn', text: '保存模板', onclick: async () => {
+    tplSave.disabled = true;
+    try {
+      const parsed = JSON.parse(tplArea.value || '[]');
+      if (!Array.isArray(parsed)) throw new Error('模板必须是数组');
+      await bridge.apiPost('config', { section: 'templates', data: parsed });
+      state.config = null;
+      toast('模板已保存并生效', 'ok');
+      await render();
+    } catch (error) {
+      toast('保存失败：' + (error && error.message ? error.message : error), 'bad');
+    } finally { tplSave.disabled = false; }
+  } });
+  const tplReset = el('button', { class: 'btn ghost', text: '恢复内置模板', onclick: async () => {
+    try {
+      await bridge.apiPost('config', { section: 'templates', data: [] });
+      state.config = null;
+      toast('已恢复为内置模板', 'ok');
+      await render();
+    } catch (error) { toast('操作失败：' + (error && error.message ? error.message : error), 'bad'); }
+  } });
+  root.appendChild(card('广告模板', '结构式规则：每个 all_of 分组里任一 any_of 命中即该组成立，全部分组成立即命中模板。'
+    + '模板命中只产生风险分并送审，是否处置由 LLM 判定结果决定。', [
+    tplArea,
+    tplStatus,
+    el('div', { class: 'field-actions' }, [tplSave, tplReset]),
+  ]));
+
+  /* 形近字表 */
+  const lines = Object.keys(homoglyph).map((key) => key + '=' + homoglyph[key]);
+  const hgArea = el('textarea', { rows: '8', class: 'mono' });
+  hgArea.value = lines.join('\n');
+  hgArea.placeholder = '每行一条，形近字=标准字，例如：珈=加';
+  const hgSave = el('button', { class: 'btn', text: '保存形近字表', onclick: async () => {
+    hgSave.disabled = true;
+    try {
+      const payload = {};
+      (hgArea.value || '').split('\n').forEach((line) => {
+        const parts = line.split('=');
+        if (parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+          payload[parts[0].trim()] = parts[1].trim();
+        }
+      });
+      await bridge.apiPost('config', { section: 'homoglyph', data: payload });
+      state.config = null;
+      toast('形近字表已保存（' + Object.keys(payload).length + ' 条）', 'ok');
+      await render();
+    } catch (error) {
+      toast('保存失败：' + (error && error.message ? error.message : error), 'bad');
+    } finally { hgSave.disabled = false; }
+  } });
+  root.appendChild(card('形近字表', '留空使用内置基线（内置覆盖广告高频字：珈/裙/苓/咨/廖/薇/薪 等）。'
+    + '在这里补充的条目会与内置表合并。', [
+    hgArea,
+    el('div', { class: 'field-actions' }, [hgSave]),
   ]));
 }
 
@@ -1461,6 +1627,7 @@ async function render() {
   else if (view.id === 'tools') await viewTools(root);
   else if (view.id === 'policy') await viewPolicy(root);
   else if (view.id === 'keywords') await viewKeywords(root);
+  else if (view.id === 'rulesx') await viewRulesX(root);
   else if (view.id === 'members') await viewMembers(root);
   else if (view.id === 'joins') await viewJoins(root);
   else viewComingSoon(root, view);

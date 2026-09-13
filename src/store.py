@@ -16,6 +16,7 @@ from .models import (
     JOIN_REVIEW_MODES,
     MODERATION_MODES,
     NUMERIC_BOUNDS,
+    RISK_CONDITION_PREFIX,
     SEND_CONDITIONS,
     CapabilityResult,
     GroupConfig,
@@ -32,6 +33,8 @@ KEY_MEMBER_CACHE = "member_cache"
 KEY_LOCAL_BLACKLIST = "local_blacklist"
 KEY_UI_STATE = "ui_state"
 KEY_JOIN_CURSOR = "join_cursor"
+KEY_TEMPLATES = "templates"
+KEY_HOMOGLYPH = "homoglyph"
 
 MEMBER_CACHE_PER_GROUP = 2000
 ROLE_CACHE_TTL = 7 * 86400
@@ -88,6 +91,11 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         "join_decline_blacklist",
         "join_trust_inviter",
         "store_text",
+        "normalize_enabled",
+        "homoglyph_enabled",
+        "template_enabled",
+        "pinyin_enabled",
+        "auto_enforce_normalized",
     ):
         settings[key] = bool(settings.get(key))
     if settings.get("mode") not in MODERATION_MODES:
@@ -99,7 +107,12 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     conditions = settings.get("send_conditions")
     if not isinstance(conditions, list):
         conditions = ["rule_hit"]
-    settings["send_conditions"] = [c for c in conditions if c in SEND_CONDITIONS] or ["rule_hit"]
+    conditions = [
+        str(item)
+        for item in conditions
+        if str(item) in SEND_CONDITIONS or str(item).startswith(RISK_CONDITION_PREFIX)
+    ]
+    settings["send_conditions"] = conditions or ["rule_hit"]
     if not isinstance(settings.get("mute_steps"), dict):
         settings["mute_steps"] = {"3": 600, "4": 3600, "5": 86400}
     if not isinstance(settings.get("action_matrix"), dict):
@@ -126,6 +139,8 @@ class PluginStore:
         self._settings: dict[str, Any] = default_settings()
         self._groups: dict[str, GroupConfig] = {}
         self._keywords: dict[str, list[dict[str, Any]]] = {"hard": [], "soft": []}
+        self._templates: list[dict[str, Any]] = []
+        self._homoglyph: dict[str, str] = {}
         self._trusted: dict[str, list[str]] = {}
         self._local_blacklist: dict[str, list[str]] = {}
         self._role_cache: dict[str, dict[str, dict[str, Any]]] = {}
@@ -165,6 +180,18 @@ class PluginStore:
             raw = await self._kv.get(key, {})
             if isinstance(raw, dict):
                 target.update({str(k): v for k, v in raw.items() if isinstance(v, (dict, list))})
+        raw_templates = await self._kv.get(KEY_TEMPLATES, [])
+        self._templates = (
+            [item for item in raw_templates if isinstance(item, dict)]
+            if isinstance(raw_templates, list)
+            else []
+        )
+        raw_homoglyph = await self._kv.get(KEY_HOMOGLYPH, {})
+        self._homoglyph = (
+            {str(k): str(v) for k, v in raw_homoglyph.items() if str(k) and str(v)}
+            if isinstance(raw_homoglyph, dict)
+            else {}
+        )
         raw_ui = await self._kv.get(KEY_UI_STATE, {})
         if isinstance(raw_ui, dict):
             self._ui_state = dict(raw_ui)
@@ -207,6 +234,10 @@ class PluginStore:
                     await self._kv.put(KEY_UI_STATE, self._ui_state)
                 elif key == KEY_JOIN_CURSOR:
                     await self._kv.put(KEY_JOIN_CURSOR, self._join_cursor)
+                elif key == KEY_TEMPLATES:
+                    await self._kv.put(KEY_TEMPLATES, self._templates)
+                elif key == KEY_HOMOGLYPH:
+                    await self._kv.put(KEY_HOMOGLYPH, self._homoglyph)
             except Exception as exc:  # pragma: no cover - KV 失败不应中断业务
                 self._dirty.add(key)
                 if self.logger is not None:
@@ -309,6 +340,32 @@ class PluginStore:
     # ------------------------------------------------------------------
     # 关键词 / 信任名单 / 黑名单
     # ------------------------------------------------------------------
+    def templates(self) -> list[dict[str, Any]]:
+        """广告模板（KV: templates；为空时由规则引擎使用内置模板）。"""
+        return self._templates
+
+    async def update_templates(self, payload: Any) -> list[dict[str, Any]]:
+        items = [item for item in (payload or []) if isinstance(item, dict)]
+        self._templates = items
+        self._dirty.add(KEY_TEMPLATES)
+        await self.flush()
+        return items
+
+    def homoglyph(self) -> dict[str, str]:
+        """形近字表（KV: homoglyph；为空时使用内置基线）。"""
+        return self._homoglyph
+
+    async def update_homoglyph(self, payload: Any) -> dict[str, str]:
+        items = {
+            str(k): str(v)
+            for k, v in (payload or {}).items()
+            if str(k) and str(v) and str(k) != str(v)
+        }
+        self._homoglyph = items
+        self._dirty.add(KEY_HOMOGLYPH)
+        await self.flush()
+        return items
+
     def keywords(self) -> dict[str, list[dict[str, Any]]]:
         return self._keywords
 

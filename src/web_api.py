@@ -206,6 +206,8 @@ class WebApi:
                 "settings": store.settings(),
                 "groups": self.service.groups_snapshot(),
                 "keywords": store.keywords(),
+                "templates": store.templates(),
+                "homoglyph": store.homoglyph(),
                 "ui_state": store.ui_state(),
                 "runtime": self.service.runtime_status(),
                 "providers": self.service.list_providers(),
@@ -237,7 +239,14 @@ class WebApi:
         try:
             if section == "settings":
                 settings = await store.update_settings(data)
+                self.service.reload_rules()
                 return json_response({"section": section, "settings": settings})
+            if section == "templates":
+                items = await self.service.update_templates(data)
+                return json_response({"section": section, "templates": items})
+            if section == "homoglyph":
+                items = await self.service.update_homoglyph(data)
+                return json_response({"section": section, "homoglyph": items})
             if section == "keywords":
                 # 必须走 service：它会在写库后 hot-reload 规则引擎，
                 # 否则 WebUI 里改的动作（例如给硬规则加"禁言"）要等插件重载才生效。

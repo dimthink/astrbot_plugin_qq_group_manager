@@ -91,7 +91,7 @@ def test_flood_counting_and_window():
 
     evaluation = engine.with_flood(engine.evaluate("hi", group_id="g1"), 9, 8)
     assert evaluation.flood is True
-    assert "刷屏" in evaluation.summary()
+    assert "高频发言" in evaluation.summary()
 
 
 def test_reload_replaces_rules():

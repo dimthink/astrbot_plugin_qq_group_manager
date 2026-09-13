@@ -81,8 +81,9 @@ from .src.models import (
     Verdict,
 )
 from .src.moderator import LLMModerator, ModerationRequest, choose_provider_id
+from .src.normalize import skeleton_text
 from .src.policy import ApprovalPolicyService
-from .src.rules import RuleEngine
+from .src.rules import SCORE_RULES, RuleEngine
 from .src.scheduler import TaskScheduler, TaskSpec
 from .src.store import AstrBotKVBackend, PluginStore
 from .src.utils import (
@@ -97,7 +98,7 @@ from .src.utils import (
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.3.7"
+VERSION = "0.4.0"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -116,7 +117,19 @@ class QQGroupManager(Star):
         self.scheduler = TaskScheduler(logger=self.logger)
         self.api = QQGroupAPI(None, dry_run_getter=self.store.dry_run)
         self.audit: AuditStore | None = None
-        self.rules = RuleEngine(self.store.keywords())
+        settings = self.store.settings()
+        self.rules = RuleEngine(
+            self.store.keywords(),
+            templates=(self.store.templates() or None)
+            if settings.get("template_enabled", True)
+            else [],
+            homoglyph=(self.store.homoglyph() or None)
+            if settings.get("homoglyph_enabled", True)
+            else {},
+            auto_enforce_normalized=bool(settings.get("auto_enforce_normalized")),
+            fuzzy_max_distance=int(settings.get("fuzzy_max_distance", 1) or 0),
+            pinyin_enabled=bool(settings.get("pinyin_enabled")),
+        )
         self.moderator = LLMModerator(settings_getter=self.store.settings, logger=self.logger)
         self.actions = ActionExecutor(api=self.api, store=self.store, logger=self.logger)
         self.joins = JoinReviewer(api=self.api, store=self.store, logger=self.logger)
@@ -909,10 +922,28 @@ class QQGroupManager(Star):
 
         recent = self.rules.note_message(group_id, sender_openid)
         threshold = int(settings.get("flood_threshold", 8) or 8)
-        evaluation = self.rules.with_flood(
-            self.rules.evaluate(text, group_id=group_id), recent, threshold
+        duplicate_senders = 0
+        if text.strip():
+            # 用骨架文本做去重键：同一文案的变体写法也能聚到一起
+            skeleton, _hits = skeleton_text(text, self.store.homoglyph() or None)
+            duplicate_senders = self.rules.note_content(
+                group_id,
+                skeleton or text,
+                sender_openid,
+                window=float(settings.get("duplicate_flood_window", 300) or 300),
+            )
+        evaluation = self.rules.evaluate(
+            text,
+            group_id=group_id,
+            flood_threshold=threshold,
+            recent_messages=recent,
+            duplicate_senders=duplicate_senders,
+            duplicate_members=int(settings.get("duplicate_flood_members", 3) or 3),
         )
-        hard_actions = evaluation.hard_actions
+        if send_images and "image" not in evaluation.signals:
+            evaluation.signals["image"] = SCORE_RULES["image"]
+            evaluation.score = min(100, evaluation.score + SCORE_RULES["image"])
+        hard_actions = evaluation.enforce_actions
         verdict = None
         latency_ms = 0
         sampled = False
@@ -938,6 +969,10 @@ class QQGroupManager(Star):
                 new_member=days is not None and days <= 1,
                 flood=evaluation.flood,
                 recent=recent,
+                risk_score=evaluation.score,
+                has_contact=evaluation.has_contact,
+                ad_template=bool(evaluation.template_hits),
+                has_image=bool(send_images),
             )
             if not should_send:
                 return
@@ -945,6 +980,10 @@ class QQGroupManager(Star):
                 group_id=group_id,
                 text=text,
                 image_urls=send_images,
+                risk_score=evaluation.score,
+                risk_signals=dict(evaluation.signals),
+                matched=[hit.pattern for hit in evaluation.hits],
+                normalized_text=str((evaluation.views or {}).get("skeleton") or ""),
                 sender_openid=sender_openid,
                 sender_name=sender_name,
                 sender_role=sender_role,
@@ -993,6 +1032,13 @@ class QQGroupManager(Star):
             send=_send,
         )
         if verdict.is_violation:
+            self.logger.info(
+                "规则评估：score=%s 命中=%s 信号=%s 骨架=%s",
+                evaluation.score,
+                [hit.pattern for hit in evaluation.hits][:4],
+                list(evaluation.signals),
+                str((evaluation.views or {}).get("skeleton") or "")[:60],
+            )
             self.logger.info(
                 "审核判定 %s/%s sev=%s conf=%.2f 实际动作=%s 计划动作=%s%s",
                 verdict.verdict,
@@ -1558,19 +1604,68 @@ class QQGroupManager(Star):
     ) -> dict[str, list[dict[str, Any]]]:
         """保存规则库并热更新规则引擎。"""
         await self.store.update_keywords(payload or {})
-        self.rules.reload(self.store.keywords())
+        self.reload_rules()
         return self.store.keywords()
+
+    def reload_rules(self) -> None:
+        """按当前配置重建规则引擎（关键词 / 模板 / 形近字表 / 运行参数）。"""
+        settings = self.store.settings()
+        self.rules.reload(
+            self.store.keywords(),
+            templates=(self.store.templates() or None)
+            if settings.get("template_enabled", True)
+            else [],
+            homoglyph=(self.store.homoglyph() or None)
+            if settings.get("homoglyph_enabled", True)
+            else {},
+        )
+        self.rules.configure(
+            auto_enforce_normalized=bool(settings.get("auto_enforce_normalized")),
+            fuzzy_max_distance=int(settings.get("fuzzy_max_distance", 1) or 0),
+            pinyin_enabled=bool(settings.get("pinyin_enabled")),
+        )
+
+    async def update_templates(self, payload: Any) -> list[dict[str, Any]]:
+        items = await self.store.update_templates(payload)
+        self.reload_rules()
+        return items
+
+    async def update_homoglyph(self, payload: Any) -> dict[str, str]:
+        items = await self.store.update_homoglyph(payload)
+        self.reload_rules()
+        return items
 
     async def test_rules(self, text: str, group_id: str = "") -> dict[str, Any]:
         """规则命中测试（WebUI 关键词视图用）。"""
-        evaluation = self.rules.evaluate(text or "", group_id=group_id)
+        settings = self.store.settings()
+        evaluation = self.rules.evaluate(
+            text or "",
+            group_id=group_id,
+            flood_threshold=int(settings.get("flood_threshold", 8) or 8),
+            duplicate_members=int(settings.get("duplicate_flood_members", 3) or 3),
+        )
         return {
             "hits": [hit.to_dict() for hit in evaluation.hits],
             "hard_actions": evaluation.hard_actions,
+            "enforce_actions": evaluation.enforce_actions,
             "summary": evaluation.summary(),
             "has_link": evaluation.has_link,
             "has_contact": evaluation.has_contact,
             "long_text": evaluation.long_text,
+            "score": evaluation.score,
+            "signals": evaluation.signals,
+            "views": evaluation.views,
+            "should_send": self.moderator.should_send(
+                rule_summary=evaluation.summary(),
+                has_link=evaluation.has_link,
+                long_text=evaluation.long_text,
+                new_member=False,
+                flood=evaluation.flood,
+                recent=evaluation.recent_messages,
+                risk_score=evaluation.score,
+                has_contact=evaluation.has_contact,
+                ad_template=bool(evaluation.template_hits),
+            ),
         }
 
     async def list_mutes(self, group_id: str | None = None) -> list[dict[str, Any]]:

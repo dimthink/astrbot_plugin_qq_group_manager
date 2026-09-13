@@ -58,6 +58,16 @@
 | `sample_rate` | 1.0 | 送审比例 |
 | `image_review` | off | 图片是否送审：off 不送 / with_text 仅图文混排送图 / always 纯图片也送 |
 | `image_review_max` | 1 | 单条消息最多送审几张图（1~4） |
+| `send_conditions` | rule_hit + risk>=60 | 送审条件；`risk>=N` 表示本地风险分达到 N 才送审 |
+| `risk_send_threshold` | 60 | 风险分阈值（WebUI 勾选"本地风险分达到阈值"时使用） |
+| `normalize_enabled` | true | 文本归一化（形近字/插符号/全角/拼音），关闭即回到旧行为 |
+| `homoglyph_enabled` | true | 形近字表 |
+| `template_enabled` | true | 广告模板规则 |
+| `pinyin_enabled` | false | 同音匹配（需环境已安装 pypinyin） |
+| `fuzzy_max_distance` | 1 | 模糊匹配编辑距离（0=关闭） |
+| `auto_enforce_normalized` | false | 归一化/模板命中是否直接按规则动作处置（默认只送审） |
+| `duplicate_flood_window` | 300 | 同文案多号刷屏的统计窗口（秒） |
+| `duplicate_flood_members` | 3 | 同文案多号刷屏的人数阈值 |
 | `llm_min_confidence` | 0.7 | 判定置信度门槛（M2） |
 | `mute_steps` | 3→10 分钟 / 4→1 小时 / 5→1 天 | 按严重度禁言时长（M2） |
 | `retention_events_days` | 30 | 审核事件/动作保留天数 |
@@ -100,7 +110,9 @@
 
 | 视图 | 内容 |
 | --- | --- |
-| 策略 → 运行参数 | dry-run、模式（strict/standard/lenient/log_only）、**审核模型**、置信度门槛、采样率、送审条件、超时、单群 QPM、全局并发、日预算、缓存、熔断阈值、最长禁言、重复违规累加、通知会话 |
+| 策略 → 规则增强 | 归一化/形近字/模板/拼音开关、模糊距离、风险分阈值、同文案多号刷屏参数 |
+| 规则增强（视图） | 广告模板与形近字表维护 + **判定测试**（展示三视图、命中依据、风险分明细、是否送审） |
+| 策略 → 运行参数 | dry-run、模式（strict/standard/lenient/log_only）、**审核模型**、图片审核、置信度门槛、采样率、送审条件、超时、单群 QPM、全局并发、日预算、缓存、熔断阈值、最长禁言、重复违规累加、通知会话 |
 | 策略 → 处置矩阵 | verdict=violation 时按 severity(1-5) 勾选动作：警告 / 撤回 / 禁言 / 上报 / 拉黑 / 移除；lenient 模式只保留警告与上报 |
 | 策略 → 提示词 | 自定义 system 提示词与 user 模板（支持占位符），留空使用内置默认 |
 | 策略 → 试跑 | 粘贴一段文本，完整走「规则 → LLM → 动作规划」但不执行任何动作 |
