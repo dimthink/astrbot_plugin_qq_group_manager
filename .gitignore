@@ -10,6 +10,9 @@ venv/
 *.db-shm
 *.log
 data/
+# 测试语料需要入库（运行时数据目录 data/ 仍被忽略）
+!tests/data/
+!tests/data/*.json
 dist/
 build/
 .DS_Store
