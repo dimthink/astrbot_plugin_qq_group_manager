@@ -30,6 +30,7 @@ KEY_ROLE_CACHE = "role_cache"
 KEY_MEMBER_CACHE = "member_cache"
 KEY_LOCAL_BLACKLIST = "local_blacklist"
 KEY_UI_STATE = "ui_state"
+KEY_JOIN_CURSOR = "join_cursor"
 
 MEMBER_CACHE_PER_GROUP = 2000
 ROLE_CACHE_TTL = 7 * 86400
@@ -115,6 +116,7 @@ class PluginStore:
         self._role_cache: dict[str, dict[str, dict[str, Any]]] = {}
         self._member_cache: dict[str, dict[str, dict[str, Any]]] = {}
         self._ui_state: dict[str, Any] = {}
+        self._join_cursor: dict[str, dict[str, Any]] = {}
         self._dirty: set[str] = set()
         self._loaded = False
 
@@ -188,6 +190,8 @@ class PluginStore:
                     await self._kv.put(KEY_MEMBER_CACHE, self._member_cache)
                 elif key == KEY_UI_STATE:
                     await self._kv.put(KEY_UI_STATE, self._ui_state)
+                elif key == KEY_JOIN_CURSOR:
+                    await self._kv.put(KEY_JOIN_CURSOR, self._join_cursor)
             except Exception as exc:  # pragma: no cover - KV 失败不应中断业务
                 self._dirty.add(key)
                 if self.logger is not None:
@@ -318,6 +322,23 @@ class PluginStore:
         self._dirty.add(KEY_LOCAL_BLACKLIST)
         await self.flush()
         return cleaned
+
+    # ------------------------------------------------------------------
+    # 入群申请轮询游标
+    # ------------------------------------------------------------------
+    def get_join_cursor_sync(self, group_id: str) -> str:
+        entry = self._join_cursor.get(group_id) or {}
+        return str(entry.get("cursor") or "")
+
+    async def get_join_cursor(self, group_id: str) -> str:
+        """读取该群的入群申请分页游标（空串表示从头拉取）。"""
+        return self.get_join_cursor_sync(group_id)
+
+    async def set_join_cursor(self, group_id: str, cursor: str) -> None:
+        """保存分页游标。"""
+        self._join_cursor[group_id] = {"cursor": str(cursor or ""), "at": now_ts()}
+        self._dirty.add(KEY_JOIN_CURSOR)
+        await self.flush()
 
     # ------------------------------------------------------------------
     # 成员与角色缓存

@@ -91,6 +91,12 @@ class WebApi:
                 "启用/停用某群审核",
             ),
             (f"/{PLUGIN_NAME}/groups/add", self.group_add, ["POST"], "手动添加群"),
+            (
+                f"/{PLUGIN_NAME}/groups/join_mode",
+                self.group_join_mode,
+                ["POST"],
+                "设置某群入群审批模式",
+            ),
             (f"/{PLUGIN_NAME}/groups/remove", self.group_remove, ["POST"], "移除群记录"),
             (f"/{PLUGIN_NAME}/selfcheck", self.selfcheck, ["POST"], "全量能力自检"),
             (f"/{PLUGIN_NAME}/instructions", self.instructions, ["GET"], "指令速查"),
@@ -100,6 +106,21 @@ class WebApi:
             (f"/{PLUGIN_NAME}/logs/clear", self.logs_clear, ["POST"], "清空日志"),
             (f"/{PLUGIN_NAME}/logs/export", self.logs_export, ["GET"], "导出日志"),
             (f"/{PLUGIN_NAME}/events/stream", self.events_stream, ["GET"], "实时日志流(SSE)"),
+            (f"/{PLUGIN_NAME}/dryrun", self.dryrun, ["POST"], "审核链路试跑（不执行动作）"),
+            (f"/{PLUGIN_NAME}/rules/test", self.rules_test, ["POST"], "本地规则命中测试"),
+            (f"/{PLUGIN_NAME}/mutes", self.mutes, ["GET"], "禁言台账"),
+            (f"/{PLUGIN_NAME}/mutes/unmute", self.mutes_unmute, ["POST"], "批量解禁"),
+            (f"/{PLUGIN_NAME}/mutes/mute", self.mutes_mute, ["POST"], "批量禁言"),
+            (f"/{PLUGIN_NAME}/mutes/sync", self.mutes_sync, ["POST"], "与平台对账禁言"),
+            (f"/{PLUGIN_NAME}/members/search", self.members_search, ["GET"], "成员查询"),
+            (f"/{PLUGIN_NAME}/members/remove", self.members_remove, ["POST"], "批量移除成员"),
+            (f"/{PLUGIN_NAME}/blacklist", self.blacklist_get, ["GET"], "黑名单查询"),
+            (f"/{PLUGIN_NAME}/blacklist", self.blacklist_set, ["POST"], "黑名单增删"),
+            (f"/{PLUGIN_NAME}/joins", self.joins_get, ["GET"], "入群申请列表"),
+            (f"/{PLUGIN_NAME}/joins/fetch", self.joins_fetch, ["POST"], "立即拉取入群申请"),
+            (f"/{PLUGIN_NAME}/joins/decide", self.joins_decide, ["POST"], "人工审批入群申请"),
+            (f"/{PLUGIN_NAME}/policy", self.policy_get, ["GET"], "官方入群审核策略"),
+            (f"/{PLUGIN_NAME}/policy", self.policy_post, ["POST"], "策略维护"),
         ]
         for kind in LOG_TABLES:
             routes.append(
@@ -289,6 +310,20 @@ class WebApi:
             )
         return json_response(result)
 
+    async def group_join_mode(self):
+        """设置某群的入群审批模式（off/strict/standard/human）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "").strip()
+        mode = str((payload or {}).get("mode") or "").strip()
+        if not group_id:
+            return error_response("缺少 group_id")
+        if mode not in JOIN_REVIEW_MODES:
+            return error_response(f"mode 必须是 {', '.join(JOIN_REVIEW_MODES)} 之一")
+        config = await self.service.store.update_group(group_id, {"join_review_mode": mode})
+        return json_response({"group": config.to_dict(), "groups": self.service.groups_snapshot()})
+
     async def group_add(self):
         """手动添加群记录（群列表自动登记之外的手动入口）。"""
         if not self._service_ready():
@@ -473,6 +508,199 @@ class WebApi:
             await audit.backup(target)
             return file_response(target, filename=target.name)
         return error_response(f"未知维护操作：{op}")
+
+    # ------------------------------------------------------------------
+    # 审核 / 规则 / 成员 / 入群
+    # ------------------------------------------------------------------
+    async def dryrun(self):
+        """审核链路试跑（完整判定，不执行任何动作）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        try:
+            result = await self.service.dryrun(payload)
+        except Exception as exc:
+            logger.error("试跑失败：%s", exc, exc_info=True)
+            return error_response(f"试跑失败：{exc}")
+        return json_response(result)
+
+    async def rules_test(self):
+        """本地规则命中测试。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        text = str((payload or {}).get("text") or "")
+        group_id = str((payload or {}).get("group_id") or "")
+        return json_response(await self.service.test_rules(text, group_id))
+
+    async def mutes(self):
+        """禁言台账。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        group_id = str(request.query.get("group_id") or "").strip()
+        rows = await self.service.list_mutes(group_id or None)
+        return json_response({"items": rows, "total": len(rows)})
+
+    async def mutes_unmute(self):
+        """批量解禁。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        openids = [str(item) for item in ((payload or {}).get("member_openids") or [])]
+        if not group_id or not openids:
+            return error_response("缺少 group_id 或 member_openids")
+        return json_response(await self.service.unmute_members(group_id, openids))
+
+    async def mutes_mute(self):
+        """批量禁言。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        openids = [str(item) for item in ((payload or {}).get("member_openids") or [])]
+        seconds = self._int_arg("seconds", 0, 0, 0) or int((payload or {}).get("seconds") or 600)
+        if not group_id or not openids:
+            return error_response("缺少 group_id 或 member_openids")
+        return json_response(
+            await self.service.mute_members(
+                group_id, openids, seconds=int(seconds), reason="WebUI 操作"
+            )
+        )
+
+    async def mutes_sync(self):
+        """与平台对账禁言状态。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        if not group_id:
+            return error_response("缺少 group_id")
+        return json_response(await self.service.sync_mutes(group_id))
+
+    async def members_search(self):
+        """成员查询（本地缓存 + 平台接口）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        group_id = str(request.query.get("group_id") or "")
+        query = str(request.query.get("q") or "")
+        if not group_id:
+            return error_response("缺少 group_id")
+        return json_response(await self.service.member_search(group_id, query))
+
+    async def members_remove(self):
+        """批量移除成员（内邀能力）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        openids = [str(item) for item in ((payload or {}).get("member_openids") or [])]
+        if not group_id or not openids:
+            return error_response("缺少 group_id 或 member_openids")
+        result = await self.service.remove_members(
+            group_id,
+            openids,
+            add_to_blacklist=bool((payload or {}).get("add_to_blacklist")),
+        )
+        if not result.get("ok"):
+            return error_response(str(result.get("message") or "移除失败"), data=result)
+        return json_response(result)
+
+    async def blacklist_get(self):
+        """黑名单查询。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        group_id = str(request.query.get("group_id") or "")
+        if not group_id:
+            return error_response("缺少 group_id")
+        return json_response(await self.service.blacklist_snapshot(group_id))
+
+    async def blacklist_set(self):
+        """黑名单增删（op=add/del）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        op = str((payload or {}).get("op") or "add")
+        openids = [str(item) for item in ((payload or {}).get("member_openids") or [])]
+        if not group_id or not openids:
+            return error_response("缺少 group_id 或 member_openids")
+        if op not in ("add", "del"):
+            return error_response("op 只能是 add 或 del")
+        return json_response(
+            await self.service.blacklist_update(
+                group_id,
+                op=op,
+                openids=openids,
+                local_only=bool((payload or {}).get("local_only")),
+            )
+        )
+
+    async def joins_get(self):
+        """入群申请（待审 + 历史 + 策略冲突）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        group_id = str(request.query.get("group_id") or "").strip()
+        return json_response(await self.service.joins_snapshot(group_id or None))
+
+    async def joins_fetch(self):
+        """立即拉取入群申请。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        if not group_id:
+            return error_response("缺少 group_id")
+        result = await self.service.joins_fetch(group_id)
+        if not result.get("ok"):
+            return error_response(str(result.get("message") or "拉取失败"), data=result)
+        return json_response(result)
+
+    async def joins_decide(self):
+        """人工审批入群申请。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        group_id = str((payload or {}).get("group_id") or "")
+        member_openid = str((payload or {}).get("member_openid") or "")
+        op = str((payload or {}).get("op") or "approve")
+        if not group_id or not member_openid:
+            return error_response("缺少 group_id 或 member_openid")
+        if op not in ("approve", "decline"):
+            return error_response("op 只能是 approve 或 decline")
+        result = await self.service.joins_decide(
+            group_id,
+            member_openid,
+            op=op,
+            join_request_id=str((payload or {}).get("join_request_id") or ""),
+            reason=str((payload or {}).get("reason") or ""),
+            blacklist=bool((payload or {}).get("blacklist")),
+            by=f"webui:{request.username or 'unknown'}",
+        )
+        if not result.get("ok"):
+            return error_response(str(result.get("message") or "审批失败"), data=result)
+        return json_response(result)
+
+    async def policy_get(self):
+        """官方入群自动审批策略。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        force = str(request.query.get("force") or "") in ("1", "true", "yes")
+        return json_response(await self.service.policy_snapshot(force=force))
+
+    async def policy_post(self):
+        """策略维护（enable/disable/execute/whitelist_add/whitelist_del/create/update/delete）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or not payload.get("op"):
+            return error_response("缺少 op")
+        result = await self.service.policy_action(payload)
+        if isinstance(result, dict) and result.get("ok") is False:
+            return error_response(str(result.get("message") or "操作失败"), data=result)
+        return json_response(result if isinstance(result, dict) else {"result": result})
 
     async def instructions(self):
         """指令速查表。"""

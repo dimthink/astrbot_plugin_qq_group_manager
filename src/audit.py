@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .utils import now_ts, safe_json_dumps, to_iso
+from .utils import now_ts, safe_json_dumps, to_iso, truncate
 
 SCHEMA_VERSION = 1
 
@@ -525,6 +525,70 @@ class AuditStore:
             },
         )
 
+    async def insert_event(self, **payload: Any) -> int | None:
+        """同步写入一条审核事件并返回自增 id（动作表需要它做外键）。
+
+        事件写入频率与 LLM 调用同量级，直接同步写可接受；API 调用/能力日志
+        这类高频记录仍走队列批量写。
+        """
+        payload.setdefault("ts_unix", now_ts())
+        payload.setdefault("ts", to_iso(payload["ts_unix"]))
+        columns = WRITE_COLUMNS["events"]
+        values = tuple(self._coerce(payload.get(column), column=column) for column in columns)
+        conn = self._conn
+        if conn is None:
+            return None
+        placeholders = ", ".join("?" for _ in columns)
+        sql = f"INSERT INTO mod_events ({', '.join(columns)}) VALUES ({placeholders})"
+        async with self._lock:
+            try:
+                cursor = await asyncio.to_thread(conn.execute, sql, values)
+                await asyncio.to_thread(conn.commit)
+                return int(cursor.lastrowid or 0)
+            except Exception as exc:  # pragma: no cover - 审计失败不应影响处置
+                self.stats["errors"] += 1
+                self.stats["last_error"] = f"{type(exc).__name__}: {exc}"
+                try:
+                    await asyncio.to_thread(conn.rollback)
+                except Exception:
+                    pass
+                if self.logger is not None:
+                    self.logger.error("写入审核事件失败：%s", exc)
+                return None
+
+    async def find_last_event(self, group_id: str, member_openid: str) -> dict[str, Any] | None:
+        """取该成员在本群最近一条被处置（非 allow）的记录，用于申诉关联。"""
+        rows = await self._fetch_all(
+            "SELECT * FROM mod_events WHERE group_id = ? AND sender_openid = ? "
+            "AND verdict != 'allow' ORDER BY ts_unix DESC LIMIT 1",
+            (group_id, member_openid),
+        )
+        return rows[0] if rows else None
+
+    async def mark_appeal(self, event_id: int, text: str, *, state: str = "pending") -> bool:
+        """给某条审核事件打上申诉标记。"""
+        conn = self._conn
+        if conn is None or not event_id:
+            return False
+        async with self._lock:
+            try:
+                await asyncio.to_thread(
+                    conn.execute,
+                    "UPDATE mod_events SET appealed = 1, appeal_text = ?, appeal_state = ? "
+                    "WHERE id = ?",
+                    (truncate(text, 200), state, int(event_id)),
+                )
+                await asyncio.to_thread(conn.commit)
+                return True
+            except Exception as exc:  # pragma: no cover
+                if self.logger is not None:
+                    self.logger.error("写入申诉标记失败：%s", exc)
+                return False
+
+    async def resolve_appeal(self, event_id: int, *, accepted: bool) -> bool:
+        """标记申诉结果（管理员复核后调用）。"""
+        return await self.mark_appeal(event_id, "", state="accepted" if accepted else "rejected")
+
     def record_event(self, **payload: Any) -> bool:
         payload.setdefault("ts_unix", now_ts())
         payload.setdefault("ts", to_iso(payload["ts_unix"]))
@@ -574,6 +638,29 @@ class AuditStore:
             )
             await asyncio.to_thread(conn.execute, sql, values)
             await asyncio.to_thread(conn.commit)
+
+    async def get_join(self, join_request_id: str) -> dict[str, Any] | None:
+        """按申请 ID 查询入群申请记录（用于幂等去重）。"""
+        rows = await self._fetch_all(
+            "SELECT * FROM join_requests WHERE join_request_id = ?", (join_request_id,)
+        )
+        return rows[0] if rows else None
+
+    async def list_joins(
+        self, group_id: str | None = None, *, decision: str = "", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """列出入群申请记录。"""
+        sql = "SELECT * FROM join_requests WHERE 1=1"
+        params: list[Any] = []
+        if group_id:
+            sql += " AND group_id = ?"
+            params.append(group_id)
+        if decision:
+            sql += " AND decision = ?"
+            params.append(decision)
+        sql += " ORDER BY ts_unix DESC LIMIT ?"
+        params.append(max(1, min(500, int(limit))))
+        return await self._fetch_all(sql, tuple(params))
 
     async def upsert_mute(
         self,

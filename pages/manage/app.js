@@ -26,10 +26,10 @@ const VIEWS = [
   { id: 'groups', label: '群管理', icon: '👥' },
   { id: 'logs', label: '日志中心', icon: '🧾' },
   { id: 'tools', label: '工具', icon: '🧰' },
-  { id: 'policy', label: '策略', icon: '⚙️', soon: 'M2' },
-  { id: 'keywords', label: '关键词', icon: '🔤', soon: 'M2' },
-  { id: 'members', label: '成员与禁言', icon: '🚫', soon: 'M3' },
-  { id: 'joins', label: '入群审批', icon: '🚪', soon: 'M3' },
+  { id: 'policy', label: '策略', icon: '⚙️' },
+  { id: 'keywords', label: '关键词', icon: '🔤' },
+  { id: 'members', label: '成员与禁言', icon: '🚫' },
+  { id: 'joins', label: '入群审批', icon: '🚪' },
 ];
 
 const LOG_TABS = [
@@ -629,6 +629,665 @@ async function viewTools(root) {
   ]));
 }
 
+/* ----------------------------------------------------------- 策略视图 */
+
+const MATRIX_ACTIONS = ['warn', 'recall', 'mute', 'report', 'blacklist', 'remove'];
+const ACTION_LABELS = {
+  warn: '警告',
+  recall: '撤回',
+  mute: '禁言',
+  report: '上报',
+  blacklist: '拉黑',
+  remove: '移除',
+};
+const CONDITION_LABELS = {
+  rule_hit: '规则命中',
+  has_link: '含链接',
+  long_text: '长文本',
+  new_member: '新成员',
+  flood: '刷屏',
+  all: '全部消息',
+};
+
+function numField(label, value, min, max, step) {
+  const input = el('input', {
+    type: 'number',
+    value: String(value),
+    min: String(min),
+    max: String(max),
+    step: String(step || 1),
+  });
+  return { node: el('label', { class: 'field' }, [el('span', { text: label }), input]), input };
+}
+
+function checkField(label, value) {
+  const input = el('input', { type: 'checkbox' });
+  input.checked = !!value;
+  return { node: el('label', { class: 'field' }, [el('span', { text: label }), input]), input };
+}
+
+async function viewPolicy(root) {
+  const config = await loadConfig();
+  const settings = Object.assign({}, config.settings || {});
+  const options = config.options || {};
+  clear(root);
+
+  /* 运行参数 */
+  const dryRun = checkField('dry-run（只记录不处置）', settings.dry_run);
+  const allowNoFull = checkField('允许未开启「接收全部消息」时启用审核（不建议）', settings.allow_without_full_msg);
+  const blockLlm = checkField('违规消息阻断后续 LLM 对话', settings.block_llm_on_violation);
+  const repeatMul = checkField('重复违规时长累加（≤3 倍）', settings.repeat_offense_multiplier);
+  const autoBlacklist = checkField('自动拉黑（内邀能力）', settings.auto_blacklist);
+  const autoRemove = checkField('自动移除成员（内邀能力，风险高）', settings.auto_remove);
+  const modeSelect = el('select');
+  (options.modes || []).forEach((mode) => {
+    modeSelect.appendChild(el('option', { value: mode, text: mode, selected: mode === settings.mode ? 'selected' : null }));
+  });
+  const minConf = numField('LLM 置信度门槛', settings.llm_min_confidence, 0, 1, 0.05);
+  const sampleRate = numField('送审采样率', settings.sample_rate, 0, 1, 0.05);
+  const timeoutField = numField('单次超时（秒）', settings.llm_timeout, 5, 120, 1);
+  const qpmField = numField('单群 QPM', settings.llm_qpm_per_group, 1, 120, 1);
+  const concurrency = numField('全局并发', settings.llm_max_concurrency, 1, 16, 1);
+  const budget = numField('每日预算（0=不限）', settings.llm_daily_budget, 0, 100000, 10);
+  const cacheTtl = numField('结果缓存（秒）', settings.cache_ttl, 0, 86400, 30);
+  const breaker = numField('熔断阈值（连续失败）', settings.circuit_break_threshold, 1, 50, 1);
+  const maxMuteDays = numField('最长禁言（天）', settings.max_mute_days, 1, 30, 1);
+  const notifySession = el('input', { type: 'text', value: settings.notify_session || '', placeholder: '如 爱莉希雅:GROUP_MESSAGE:xxxx' });
+
+  const conditions = el('div', { class: 'row' });
+  Object.keys(CONDITION_LABELS).forEach((key) => {
+    const box = el('input', { type: 'checkbox' });
+    box.checked = (settings.send_conditions || []).indexOf(key) >= 0;
+    box.dataset.key = key;
+    conditions.appendChild(el('label', { class: 'switch' }, [box, el('span', { text: CONDITION_LABELS[key] })]));
+  });
+
+  /* 处置矩阵 */
+  const matrix = JSON.parse(JSON.stringify(settings.action_matrix || { violation: {} }));
+  const matrixBox = el('div', { class: 'grid cols-2' });
+  const matrixInputs = {};
+  for (let severity = 1; severity <= 5; severity += 1) {
+    const key = String(severity);
+    const current = (matrix.violation && (matrix.violation[key] || matrix.violation[severity])) || [];
+    const row = el('div', { class: 'notice' });
+    row.appendChild(el('div', { text: 'severity = ' + key }));
+    const wrap = el('div', { class: 'row' });
+    const list = Array.isArray(current) ? current : [current];
+    matrixInputs[key] = {};
+    MATRIX_ACTIONS.forEach((action) => {
+      const box = el('input', { type: 'checkbox' });
+      box.checked = list.indexOf(action) >= 0;
+      matrixInputs[key][action] = box;
+      wrap.appendChild(el('label', { class: 'switch' }, [box, el('span', { text: ACTION_LABELS[action] })]));
+    });
+    row.appendChild(wrap);
+    matrixBox.appendChild(row);
+  }
+
+  /* 提示词 */
+  const systemPrompt = el('textarea', { placeholder: '留空使用内置默认提示词' });
+  systemPrompt.value = settings.prompt_system || '';
+  const userPrompt = el('textarea', { placeholder: '留空使用内置默认模板' });
+  userPrompt.value = settings.prompt_user || '';
+  const promptHint = el('p', {
+    class: 'card-desc',
+    text: '可用占位符：{rules_brief} {rule_summary} {message_kind} {sender_name} {sender_role} {days} {recent} {text}',
+  });
+
+  const saveBtn = el('button', { class: 'btn', text: '保存策略', onclick: async () => {
+    saveBtn.disabled = true;
+    const matrixPayload = {};
+    Object.keys(matrixInputs).forEach((severity) => {
+      const picked = MATRIX_ACTIONS.filter((action) => matrixInputs[severity][action].checked);
+      matrixPayload[severity] = picked;
+    });
+    const payload = {
+      dry_run: dryRun.input.checked,
+      allow_without_full_msg: allowNoFull.input.checked,
+      block_llm_on_violation: blockLlm.input.checked,
+      repeat_offense_multiplier: repeatMul.input.checked,
+      auto_blacklist: autoBlacklist.input.checked,
+      auto_remove: autoRemove.input.checked,
+      mode: modeSelect.value,
+      llm_min_confidence: Number(minConf.input.value),
+      sample_rate: Number(sampleRate.input.value),
+      llm_timeout: Number(timeoutField.input.value),
+      llm_qpm_per_group: Number(qpmField.input.value),
+      llm_max_concurrency: Number(concurrency.input.value),
+      llm_daily_budget: Number(budget.input.value),
+      cache_ttl: Number(cacheTtl.input.value),
+      circuit_break_threshold: Number(breaker.input.value),
+      max_mute_days: Number(maxMuteDays.input.value),
+      notify_session: notifySession.value.trim(),
+      action_matrix: { violation: matrixPayload },
+      send_conditions: Array.from(conditions.querySelectorAll('input')).filter((box) => box.checked).map((box) => box.dataset.key),
+      prompt_system: systemPrompt.value,
+      prompt_user: userPrompt.value,
+    };
+    try {
+      await bridge.apiPost('config', { section: 'settings', data: payload });
+      state.config = null;
+      toast('策略已保存', 'ok');
+      await render();
+    } catch (error) {
+      toast('保存失败：' + error.message, 'bad');
+    } finally { saveBtn.disabled = false; }
+  } });
+
+  /* 试跑 */
+  const dryText = el('textarea', { placeholder: '粘贴一段消息，点「试跑」查看完整判定链（不会执行任何动作）' });
+  const dryOut = el('pre', { class: 'guide', text: '尚未试跑。' });
+  const dryBtn = el('button', { class: 'btn ghost', text: '试跑', onclick: async () => {
+    dryBtn.disabled = true;
+    dryOut.textContent = '正在判定…';
+    try {
+      const result = await bridge.apiPost('dryrun', { kind: 'message', text: dryText.value });
+      dryOut.textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+      dryOut.textContent = '试跑失败：' + error.message;
+    } finally { dryBtn.disabled = false; }
+  } });
+
+  root.appendChild(card('运行参数', '首次安装默认 dry-run + lenient；确认判定质量后再关闭 dry-run 并切到标准档。', [
+    el('div', { class: 'row' }, [dryRun.node, allowNoFull.node, blockLlm.node]),
+    el('div', { class: 'row' }, [
+      el('label', { class: 'field' }, [el('span', { text: '默认模式' }), modeSelect]),
+      minConf.node, sampleRate.node, timeoutField.node,
+    ]),
+    el('div', { class: 'row' }, [qpmField.node, concurrency.node, budget.node, cacheTtl.node, breaker.node]),
+    el('div', { class: 'row' }, [maxMuteDays.node, repeatMul.node, autoBlacklist.node, autoRemove.node]),
+    el('label', { class: 'field' }, [el('span', { text: '管理员通知会话（umo）' }), notifySession]),
+    el('div', { class: 'field-actions' }, [el('span', { class: 'muted', text: '送审条件：' })]),
+    conditions,
+  ]));
+
+  root.appendChild(card('处置矩阵', 'verdict = violation 时按 severity 执行的动作；lenient 模式只会保留警告与上报。', [matrixBox]));
+
+  root.appendChild(card('提示词', '留空使用内置默认值；修改后建议先在下方试跑验证。', [promptHint, systemPrompt, userPrompt]));
+
+  root.appendChild(card('保存', null, [el('div', { class: 'field-actions' }, [saveBtn])]));
+
+  root.appendChild(card('试跑（dry-run）', '完整走一遍「规则 → LLM → 动作规划」，不执行任何真实动作。', [
+    dryText,
+    el('div', { class: 'field-actions' }, [dryBtn]),
+    dryOut,
+  ]));
+}
+
+/* --------------------------------------------------------- 关键词视图 */
+
+async function viewKeywords(root) {
+  const config = await loadConfig();
+  const keywords = JSON.parse(JSON.stringify(config.keywords || { hard: [], soft: [] }));
+  clear(root);
+
+  const groups = config.groups || [];
+  const groupSelect = el('select');
+  groupSelect.appendChild(el('option', { value: '', text: '（全局，作用于所有群）' }));
+  groups.forEach((group) => {
+    groupSelect.appendChild(el('option', { value: group.group_id, text: (group.name || shortId(group.group_id)) }));
+  });
+
+  const typeSelect = el('select');
+  [['literal', '关键词（包含匹配）'], ['regex', '正则表达式']].forEach((pair) => {
+    typeSelect.appendChild(el('option', { value: pair[0], text: pair[1] }));
+  });
+  const bucketSelect = el('select');
+  [['hard', '硬规则（命中即处置）'], ['soft', '软规则（提升关注，仍由 LLM 判定）']].forEach((pair) => {
+    bucketSelect.appendChild(el('option', { value: pair[0], text: pair[1] }));
+  });
+  const patternInput = el('input', { type: 'text', placeholder: '例如：加群 / 私\\s*聊 / https?://' });
+  const actionWrap = el('div', { class: 'row' });
+  const actionBoxes = {};
+  MATRIX_ACTIONS.forEach((action) => {
+    const box = el('input', { type: 'checkbox' });
+    actionBoxes[action] = box;
+    actionWrap.appendChild(el('label', { class: 'switch' }, [box, el('span', { text: ACTION_LABELS[action] })]));
+  });
+
+  const reload = async (next) => {
+    try {
+      await bridge.apiPost('config', { section: 'keywords', data: next });
+      state.config = null;
+      toast('规则库已保存', 'ok');
+      await render();
+    } catch (error) { toast('保存失败：' + error.message, 'bad'); }
+  };
+
+  const addBtn = el('button', { class: 'btn', text: '添加规则', onclick: async () => {
+    const pattern = patternInput.value.trim();
+    if (!pattern) { toast('请填写规则内容', 'bad'); return; }
+    const bucket = bucketSelect.value;
+    const actions = MATRIX_ACTIONS.filter((action) => actionBoxes[action].checked);
+    if (bucket === 'hard' && !actions.length) { toast('硬规则至少要选一个动作', 'bad'); return; }
+    const next = JSON.parse(JSON.stringify(keywords));
+    next[bucket] = next[bucket] || [];
+    next[bucket].push({
+      id: pattern.slice(0, 24),
+      type: typeSelect.value,
+      pattern,
+      action: bucket === 'hard' ? actions : [],
+      scope: groupSelect.value || 'all',
+      enabled: true,
+      note: '',
+    });
+    await reload(next);
+  } });
+
+  const testText = el('textarea', { placeholder: '输入一段测试文本，查看命中的规则' });
+  const testOut = el('pre', { class: 'guide', text: '尚未测试。' });
+  const testBtn = el('button', { class: 'btn ghost', text: '命中测试', onclick: async () => {
+    testBtn.disabled = true;
+    try {
+      const result = await bridge.apiPost('rules/test', {
+        text: testText.value,
+        group_id: groupSelect.value || '',
+      });
+      testOut.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { testOut.textContent = '测试失败：' + error.message; }
+    finally { testBtn.disabled = false; }
+  } });
+
+  root.appendChild(card('添加规则', '硬规则命中即按所选动作处置；软规则只提升关注度，最终仍由 LLM 判定。', [
+    el('div', { class: 'row' }, [bucketSelect, typeSelect, patternInput, groupSelect]),
+    actionWrap,
+    el('div', { class: 'field-actions' }, [addBtn]),
+  ]));
+
+  for (const bucket of ['hard', 'soft']) {
+    const items = keywords[bucket] || [];
+    const tbody = el('tbody');
+    items.forEach((item, index) => {
+      const toggle = el('input', { type: 'checkbox' });
+      toggle.checked = item.enabled !== false;
+      toggle.addEventListener('change', async () => {
+        const next = JSON.parse(JSON.stringify(keywords));
+        next[bucket][index].enabled = toggle.checked;
+        await reload(next);
+      });
+      const del = el('button', { class: 'btn small danger', text: '删除', onclick: async () => {
+        const next = JSON.parse(JSON.stringify(keywords));
+        next[bucket].splice(index, 1);
+        await reload(next);
+      } });
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, [toggle]),
+        el('td', { text: item.type === 'regex' ? '正则' : '关键词' }),
+        el('td', { class: 'mono', text: item.pattern }),
+        el('td', { text: (item.action || []).map((action) => ACTION_LABELS[action] || action).join('、') || '—' }),
+        el('td', { text: String(item.scope || 'all') === 'all' ? '全局' : shortId(item.scope) }),
+        el('td', {}, [del]),
+      ]));
+    });
+    root.appendChild(card(bucket === 'hard' ? '硬规则' : '软规则', '共 ' + items.length + ' 条', [
+      el('div', { class: 'table-wrap' }, [
+        el('table', {}, [
+          el('thead', {}, [el('tr', {}, ['启用', '类型', '内容', '动作', '作用域', '操作'].map((text) => el('th', { text })))]),
+          tbody,
+        ]),
+      ]),
+    ]));
+  }
+
+  root.appendChild(card('命中测试', '与真实审核使用同一套规则引擎（含外链、联系方式、刷屏等内置检测）。', [
+    testText,
+    el('div', { class: 'field-actions' }, [testBtn]),
+    testOut,
+  ]));
+}
+
+/* ----------------------------------------------------- 成员与禁言视图 */
+
+async function viewMembers(root) {
+  const config = await loadConfig();
+  const groups = config.groups || [];
+  clear(root);
+  if (!groups.length) {
+    root.appendChild(notice('还没有登记任何群：让机器人在群里收到一条消息后再回到这里。'));
+    return;
+  }
+  const selected = (config.ui_state || {}).members_group || groups[0].group_id;
+  const groupSelect = el('select');
+  groups.forEach((group) => {
+    groupSelect.appendChild(el('option', {
+      value: group.group_id,
+      text: (group.name || shortId(group.group_id)),
+      selected: group.group_id === selected ? 'selected' : null,
+    }));
+  });
+  groupSelect.addEventListener('change', async () => {
+    await bridge.apiPost('ui_state', { members_group: groupSelect.value });
+    state.config = null;
+    await render();
+  });
+
+  const mutesBox = el('div', { class: 'loading', text: '正在加载禁言台账…' });
+  const blacklistBox = el('div', { class: 'loading', text: '正在加载黑名单…' });
+  const searchInput = el('input', { type: 'text', placeholder: '昵称关键字或完整 openid' });
+  const searchOut = el('pre', { class: 'guide', text: '尚未查询。' });
+
+  root.appendChild(card('成员与禁言', '禁言台账来自本地记录并与平台对账；黑名单区分「平台」与「本地」两套。', [
+    el('div', { class: 'row' }, [groupSelect]),
+  ]));
+
+  const loadMutes = async () => {
+    clear(mutesBox);
+    try {
+      const data = await bridge.apiGet('mutes', { group_id: groupSelect.value });
+      const items = data.items || [];
+      if (!items.length) {
+        mutesBox.appendChild(notice('当前没有生效中的禁言记录。'));
+        return;
+      }
+      const tbody = el('tbody');
+      items.forEach((row) => {
+        const unmute = el('button', { class: 'btn small ghost', text: '解禁', onclick: async () => {
+          try {
+            await bridge.apiPost('mutes/unmute', {
+              group_id: groupSelect.value,
+              member_openids: [row.member_openid],
+            });
+            toast('已解禁', 'ok');
+            await loadMutes();
+          } catch (error) { toast('解禁失败：' + error.message, 'bad'); }
+        } });
+        tbody.appendChild(el('tr', {}, [
+          el('td', { text: row.username || '（未知）' }),
+          el('td', { class: 'mono', text: shortId(row.member_openid) }),
+          el('td', { text: fmtTime(row.until_ts) }),
+          el('td', { text: row.source || '-' }),
+          el('td', { text: row.reason || '-' }),
+          el('td', {}, [unmute]),
+        ]));
+      });
+      mutesBox.appendChild(el('div', { class: 'table-wrap' }, [
+        el('table', {}, [
+          el('thead', {}, [el('tr', {}, ['成员', 'OpenID', '到期', '来源', '理由', '操作'].map((text) => el('th', { text })))]),
+          tbody,
+        ]),
+      ]));
+      const syncBtn = el('button', { class: 'btn ghost small', text: '与平台对账', onclick: async () => {
+        try {
+          const result = await bridge.apiPost('mutes/sync', { group_id: groupSelect.value });
+          toast(result.ok ? '已对账，平台禁言 ' + (result.count || 0) + ' 人' : '对账失败：' + result.message, result.ok ? 'ok' : 'bad');
+          await loadMutes();
+        } catch (error) { toast('对账失败：' + error.message, 'bad'); }
+      } });
+      mutesBox.appendChild(el('div', { class: 'field-actions' }, [syncBtn]));
+    } catch (error) {
+      mutesBox.appendChild(notice('加载失败：' + error.message, 'bad'));
+    }
+  };
+
+  const loadBlacklist = async () => {
+    clear(blacklistBox);
+    try {
+      const data = await bridge.apiGet('blacklist', { group_id: groupSelect.value });
+      blacklistBox.appendChild(el('div', { class: 'grid cols-2' }, [
+        el('div', { class: 'notice' }, [
+          el('div', { text: '平台黑名单（' + (data.platform || []).length + '）' }),
+          el('div', { class: 'mono', text: (data.platform || []).map((item) => (item.username || '') + ' ' + shortId(item.member_openid)).join('；') || '（空）' }),
+          data.error ? el('div', { class: 'muted', text: '接口不可用：' + data.error }) : null,
+        ]),
+        el('div', { class: 'notice' }, [
+          el('div', { text: '本地黑名单（' + (data.local || []).length + '）' }),
+          el('div', { class: 'mono', text: (data.local || []).map((openid) => shortId(openid)).join('；') || '（空）' }),
+          el('div', { class: 'muted', text: '本地黑名单只影响插件判定（自动拒绝入群、命中即处置）。' }),
+        ]),
+      ]));
+      const removeBtn = el('button', { class: 'btn small danger', text: '移除成员（内邀能力）', onclick: async () => {
+        if (!window.confirm('将调用平台的批量移除接口，操作不可撤销。确认继续？')) return;
+        const openid = window.prompt('请输入要移除的 member_openid：');
+        if (!openid) return;
+        try {
+          const result = await bridge.apiPost('members/remove', {
+            group_id: groupSelect.value,
+            member_openids: [openid.trim()],
+            add_to_blacklist: false,
+          });
+          toast('移除成功：' + JSON.stringify(result.response || {}), 'ok');
+        } catch (error) { toast('移除失败：' + error.message, 'bad'); }
+      } });
+      blacklistBox.appendChild(el('div', { class: 'field-actions' }, [removeBtn]));
+    } catch (error) {
+      blacklistBox.appendChild(notice('加载失败：' + error.message, 'bad'));
+    }
+  };
+
+  const searchBtn = el('button', { class: 'btn ghost', text: '查询成员', onclick: async () => {
+    searchBtn.disabled = true;
+    try {
+      const data = await bridge.apiGet('members/search', {
+        group_id: groupSelect.value,
+        q: searchInput.value.trim(),
+      });
+      searchOut.textContent = JSON.stringify(data, null, 2);
+    } catch (error) { searchOut.textContent = '查询失败：' + error.message; }
+    finally { searchBtn.disabled = false; }
+  } });
+
+  root.appendChild(card('禁言台账', null, [mutesBox]));
+  root.appendChild(card('黑名单', null, [blacklistBox]));
+  root.appendChild(card('成员查询', '优先查本地缓存（群消息里见过的成员）；输入完整 openid 时会调用平台成员接口（内邀能力）。', [
+    el('div', { class: 'row' }, [searchInput, el('div', { class: 'field-actions' }, [searchBtn])]),
+    searchOut,
+  ]));
+
+  await Promise.all([loadMutes(), loadBlacklist()]);
+}
+
+/* ------------------------------------------------------- 入群审批视图 */
+
+async function viewJoins(root) {
+  const config = await loadConfig();
+  const groups = config.groups || [];
+  clear(root);
+  if (!groups.length) {
+    root.appendChild(notice('还没有登记任何群：让机器人在群里收到一条消息后再回到这里。'));
+    return;
+  }
+  const selected = (config.ui_state || {}).joins_group || groups[0].group_id;
+  const groupSelect = el('select');
+  groups.forEach((group) => {
+    groupSelect.appendChild(el('option', {
+      value: group.group_id,
+      text: (group.name || shortId(group.group_id)),
+      selected: group.group_id === selected ? 'selected' : null,
+    }));
+  });
+  groupSelect.addEventListener('change', async () => {
+    await bridge.apiPost('ui_state', { joins_group: groupSelect.value });
+    state.config = null;
+    await render();
+  });
+
+  const modeSelect = el('select');
+  (config.options && config.options.join_modes ? config.options.join_modes : ['off']).forEach((mode) => {
+    modeSelect.appendChild(el('option', {
+      value: mode,
+      text: mode,
+      selected: mode === (groups.find((item) => item.group_id === selected) || {}).effective_join_mode ? 'selected' : null,
+    }));
+  });
+  const modeSave = el('button', { class: 'btn small', text: '应用模式', onclick: async () => {
+    try {
+      const snapshot = config.groups || [];
+      const next = snapshot.map((group) => (group.group_id === groupSelect.value
+        ? Object.assign({}, group, { join_review_mode: modeSelect.value })
+        : group));
+      await bridge.apiPost('groups/join_mode', { group_id: groupSelect.value, mode: modeSelect.value });
+      state.config = null;
+      toast('入群审批模式已更新', 'ok');
+      await render();
+    } catch (error) { toast('更新失败：' + error.message, 'bad'); }
+  } });
+
+  const fetchBtn = el('button', { class: 'btn ghost', text: '立即拉取申请', onclick: async () => {
+    fetchBtn.disabled = true;
+    try {
+      const result = await bridge.apiPost('joins/fetch', { group_id: groupSelect.value });
+      toast(result.ok ? '已拉取，新增待审 ' + ((result.created || []).length) : '拉取失败：' + result.message, result.ok ? 'ok' : 'bad');
+      await render();
+    } catch (error) { toast('拉取失败：' + error.message, 'bad'); }
+    finally { fetchBtn.disabled = false; }
+  } });
+
+  root.appendChild(card('入群审批', '插件通过轮询获取入群申请（平台不推送该事件）；官方策略命中的申请不会出现在这里。', [
+    el('div', { class: 'row' }, [
+      groupSelect, modeSelect,
+      el('div', { class: 'field-actions' }, [modeSave, fetchBtn]),
+    ]),
+  ]));
+
+  let snapshot = null;
+  try {
+    snapshot = await bridge.apiGet('joins', { group_id: groupSelect.value });
+  } catch (error) {
+    root.appendChild(notice('加载入群申请失败：' + error.message, 'bad'));
+    return;
+  }
+
+  const conflicts = (snapshot.conflicts || {}).conflicts || [];
+  if (conflicts.length) {
+    root.appendChild(notice('官方入群自动审批策略与插件自动审批同时生效，可能重复处理：' + conflicts.map(shortId).join('、'), 'warn'));
+  }
+  if ((snapshot.conflicts || {}).checked === false) {
+    root.appendChild(notice('无法读取官方策略列表：' + ((snapshot.conflicts || {}).error || '未知原因') + '（不影响插件自身审批）'));
+  }
+
+  const pending = snapshot.pending || [];
+  const decision = async (item, op) => {
+    const request = item.request || {};
+    const reason = op === 'decline' ? (window.prompt('拒绝理由（可选，会展示给申请人）：') || '') : '';
+    try {
+      await bridge.apiPost('joins/decide', {
+        group_id: item.group_id,
+        member_openid: request.member_openid,
+        join_request_id: request.join_request_id,
+        op,
+        reason,
+        blacklist: op === 'decline' ? window.confirm('同时加入群黑名单？（内邀能力，可能失败）') : false,
+      });
+      toast(op === 'approve' ? '已通过' : '已拒绝', 'ok');
+      await render();
+    } catch (error) { toast('审批失败：' + error.message, 'bad'); }
+  };
+
+  const progress = snapshot.status || {};
+  const pendingBody = el('tbody');
+  pending.forEach((item) => {
+    const request = item.request || {};
+    const verify = request.verify_info || {};
+    pendingBody.appendChild(el('tr', {}, [
+      el('td', { text: request.username || '未知' }),
+      el('td', { text: request.apply_source === 'invited' ? '被邀请' : '主动申请' }),
+      el('td', { text: (verify.verify_message || '（无）').slice(0, 40) }),
+      el('td', { text: request.risk_tips || '无' }),
+      el('td', { text: ((item.decision || {}).reason || '-').slice(0, 30) }),
+      el('td', {}, [el('div', { class: 'field-actions' }, [
+        el('button', { class: 'btn small', text: '通过', onclick: () => decision(item, 'approve') }),
+        el('button', { class: 'btn small danger', text: '拒绝', onclick: () => decision(item, 'decline') }),
+      ])]),
+    ]));
+  });
+  root.appendChild(card('待人工审批（' + pending.length + '）', '轮询 ' + (progress.polls || 0) + ' 次，累计获取 ' + (progress.fetched || 0) + ' 条申请', pending.length ? [
+    el('div', { class: 'table-wrap' }, [
+      el('table', {}, [
+        el('thead', {}, [el('tr', {}, ['申请人', '来源', '验证消息', '风险提示', '机器建议', '操作'].map((text) => el('th', { text })))]),
+        pendingBody,
+      ]),
+    ]),
+  ] : [notice('当前没有待人工审批的申请。')]));
+
+  const history = snapshot.history || [];
+  const historyBody = el('tbody');
+  history.slice(0, 30).forEach((row) => {
+    historyBody.appendChild(el('tr', {}, [
+      el('td', { text: fmtTime(row.ts_unix ? new Date(row.ts_unix * 1000).toISOString() : '') }),
+      el('td', { text: row.username || '未知' }),
+      el('td', { text: row.decision || '-' }),
+      el('td', { text: row.decided_by || '-' }),
+      el('td', { text: typeof row.confidence === 'number' ? row.confidence.toFixed(2) : '-' }),
+      el('td', { text: (row.reason || '').slice(0, 40) }),
+    ]));
+  });
+  root.appendChild(card('历史记录（' + history.length + '）', null, history.length ? [
+    el('div', { class: 'table-wrap' }, [
+      el('table', {}, [
+        el('thead', {}, [el('tr', {}, ['时间', '申请人', '决策', '决策方', '置信度', '原因'].map((text) => el('th', { text })))]),
+        historyBody,
+      ]),
+    ]),
+  ] : [notice('暂无记录。')]));
+
+  let policyData = null;
+  try {
+    policyData = await bridge.apiGet('policy');
+  } catch (error) { policyData = { strategies: [], error: error.message }; }
+  const policyBody = el('tbody');
+  (policyData.strategies || []).forEach((item) => {
+    const toggle = el('button', {
+      class: 'btn small ghost',
+      text: String(item.is_enable).toLowerCase() === 'on' ? '停用' : '启用',
+      onclick: async () => {
+        try {
+          await bridge.apiPost('policy', {
+            op: String(item.is_enable).toLowerCase() === 'on' ? 'disable' : 'enable',
+            strategy_id: item.strategy_id,
+          });
+          toast('已更新策略状态', 'ok');
+          await render();
+        } catch (error) { toast('更新失败：' + error.message, 'bad'); }
+      },
+    });
+    const exec = el('button', { class: 'btn small ghost', text: '全量扫描', onclick: async () => {
+      try {
+        await bridge.apiPost('policy', { op: 'execute', strategy_id: item.strategy_id });
+        toast('已触发全量扫描（官方说明约 10 分钟完成）', 'ok');
+      } catch (error) { toast('触发失败：' + error.message, 'bad'); }
+    } });
+    const whitelist = el('button', { class: 'btn small ghost', text: '白名单', onclick: async () => {
+      const raw = window.prompt('输入要新增的白名单 QQ 号（逗号分隔，留空则改为删除模式）：');
+      if (raw === null) return;
+      try {
+        if (raw.trim()) {
+          await bridge.apiPost('policy', {
+            op: 'whitelist_add',
+            strategy_id: item.strategy_id,
+            users: raw.split(',').map((item2) => item2.trim()).filter(Boolean),
+          });
+          toast('已新增白名单号码', 'ok');
+        } else {
+          const del = window.prompt('输入要删除的白名单 QQ 号（逗号分隔）：') || '';
+          await bridge.apiPost('policy', {
+            op: 'whitelist_del',
+            strategy_id: item.strategy_id,
+            users: del.split(',').map((item2) => item2.trim()).filter(Boolean),
+          });
+          toast('已删除白名单号码', 'ok');
+        }
+        await render();
+      } catch (error) { toast('白名单更新失败：' + error.message, 'bad'); }
+    } });
+    policyBody.appendChild(el('tr', {}, [
+      el('td', { class: 'mono', text: item.strategy_id }),
+      el('td', { text: String(item.is_enable).toLowerCase() === 'on' ? '启用中' : '已停用' }),
+      el('td', { text: ((item.group_openids || []).map(shortId).join('、')) || ((item.group_ids || []).join('、')) || '-' }),
+      el('td', { text: String(item.whitelist_user_count || 0) }),
+      el('td', { text: fmtTime(item.expire_at) }),
+      el('td', {}, [el('div', { class: 'field-actions' }, [toggle, exec, whitelist])]),
+    ]));
+  });
+  root.appendChild(card('官方入群自动审批策略', policyData.error ? '读取失败：' + policyData.error : '插件默认不创建策略，只做透明化展示与白名单维护。', (policyData.strategies || []).length ? [
+    el('div', { class: 'table-wrap' }, [
+      el('table', {}, [
+        el('thead', {}, [el('tr', {}, ['策略 ID', '状态', '关联群', '白名单数', '到期', '操作'].map((text) => el('th', { text })))]),
+        policyBody,
+      ]),
+    ]),
+  ] : [notice(policyData.error ? '无法读取策略列表（接口可能未开放）。' : '当前没有任何策略。')]));
+}
+
 /* ------------------------------------------------------------- 占位视图 */
 
 function viewComingSoon(root, view) {
@@ -653,16 +1312,14 @@ async function render() {
     root.appendChild(notice('无法读取插件配置：' + error.message + '（请确认插件已启用并在 WebUI 中重载过）', 'bad'));
     return;
   }
-  if (view.soon && view.id !== 'dashboard') {
-    if (['policy', 'keywords', 'members', 'joins'].indexOf(view.id) >= 0) {
-      viewComingSoon(root, view);
-      return;
-    }
-  }
   if (view.id === 'dashboard') await viewDashboard(root);
   else if (view.id === 'groups') await viewGroups(root);
   else if (view.id === 'logs') await viewLogs(root);
   else if (view.id === 'tools') await viewTools(root);
+  else if (view.id === 'policy') await viewPolicy(root);
+  else if (view.id === 'keywords') await viewKeywords(root);
+  else if (view.id === 'members') await viewMembers(root);
+  else if (view.id === 'joins') await viewJoins(root);
   else viewComingSoon(root, view);
 }
 

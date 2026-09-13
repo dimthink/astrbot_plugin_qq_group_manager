@@ -1,4 +1,4 @@
-"""插件契约冒烟测试：metadata、main 导入、指令匹配。"""
+"""插件契约冒烟测试：metadata、main 导入、指令匹配、Web 路由。"""
 
 from __future__ import annotations
 
@@ -26,27 +26,19 @@ def test_metadata_contract():
     assert meta["desc"]
 
 
-def test_main_imports_and_matches_commands():
+def test_main_imports_and_commands():
     main = _import_main()
     assert PLUGIN_ROOT.name == main.PLUGIN_NAME
     assert main.VERSION
-    match = main.QQGroupManager._match_command
+    commands = importlib.import_module(f"{PLUGIN_ROOT.name}.src.commands")
+    match = commands.match_command
     assert match("群信息") == ("群信息", [])
-    assert match("群信息 额外参数") == ("群信息", ["额外参数"])
+    assert match("禁言 @张三 10分钟") == ("禁言", ["@张三", "10分钟"])
     assert match("审核状态")[0] == "审核状态"
     assert match("随便聊聊") == ("", [])
     assert match("") == ("", [])
-
-
-def test_web_api_routes_are_declared():
-    web_api = importlib.import_module(f"{PLUGIN_ROOT.name}.src.web_api")
-    assert PLUGIN_ROOT.name == web_api.PLUGIN_NAME
-    bus = web_api.EventBus()
-    queue = bus.subscribe("audit")
-    bus.publish("audit", {"kind": "events"})
-    assert queue.get_nowait()["kind"] == "events"
-    bus.unsubscribe("audit", queue)
-    assert bus.subscriber_count("audit") == 0
+    assert not set(commands.PUBLIC_COMMANDS) & set(commands.ADMIN_ONLY_COMMANDS)
+    assert not set(commands.PUBLIC_COMMANDS) & set(commands.GROUP_ADMIN_COMMANDS)
 
 
 class FakeContext:
@@ -84,7 +76,27 @@ def test_web_api_registers_prefixed_routes():
         prefix + "events/stream",
         prefix + "selfcheck",
         prefix + "instructions",
+        prefix + "dryrun",
+        prefix + "rules/test",
+        prefix + "mutes",
+        prefix + "mutes/unmute",
+        prefix + "members/search",
+        prefix + "blacklist",
+        prefix + "joins",
+        prefix + "joins/fetch",
+        prefix + "joins/decide",
+        prefix + "policy",
     ):
         assert expected in paths, expected
     for kind in ("events", "actions", "api", "capability"):
         assert prefix + "logs/" + kind in paths
+
+
+def test_event_bus_pub_sub():
+    web_api = importlib.import_module(f"{PLUGIN_ROOT.name}.src.web_api")
+    bus = web_api.EventBus()
+    queue = bus.subscribe("audit")
+    bus.publish("audit", {"kind": "events"})
+    assert queue.get_nowait()["kind"] == "events"
+    bus.unsubscribe("audit", queue)
+    assert bus.subscriber_count("audit") == 0

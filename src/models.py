@@ -301,13 +301,15 @@ def default_settings() -> dict[str, Any]:
         "cache_ttl": 600,
         "circuit_break_threshold": 5,
         "block_llm_on_violation": False,
+        # 标准档处置矩阵；首次安装以 mode=lenient 兜底（只保留 warn/report），
+        # 因此"安装即温和"与"切到标准档即完整处置"两个诉求可以同时成立。
         "action_matrix": {
             "violation": {
                 "1": ["warn"],
                 "2": ["warn"],
-                "3": ["warn"],
-                "4": ["warn"],
-                "5": ["warn", "report"],
+                "3": ["warn", "mute"],
+                "4": ["recall", "mute"],
+                "5": ["recall", "mute", "report"],
             }
         },
         "mute_steps": {"3": 600, "4": 3600, "5": 86400},

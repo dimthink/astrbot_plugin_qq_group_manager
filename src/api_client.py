@@ -858,6 +858,91 @@ class QQGroupAPI:
             write=True,
         )
 
+    # ---------------- 入群自动审批策略（Bot 级，无 group 路径段） ----------------
+    STRATEGY_PATH = "/v2/groups/join_approval_strategy"
+
+    async def list_approval_strategies(
+        self, *, cursor: str = "", limit: int = 20, caller: str = "policy"
+    ) -> dict[str, Any]:
+        """查询入群自动审批策略列表。"""
+        return await self._request(
+            "GET",
+            self.STRATEGY_PATH,
+            caller=caller,
+            query={"cursor": cursor or "", "limit": clamp_int(limit, 20, 1, 50)},
+        )
+
+    async def create_approval_strategy(
+        self, payload: dict[str, Any], *, caller: str = "policy"
+    ) -> dict[str, Any]:
+        """创建策略（group_openids 与 group_ids 二选一）。"""
+        return await self._request(
+            "POST",
+            self.STRATEGY_PATH,
+            caller=caller,
+            json_body=dict(payload),
+            write=True,
+        )
+
+    async def update_approval_strategy(
+        self, strategy_id: str, payload: dict[str, Any], *, caller: str = "policy"
+    ) -> dict[str, Any]:
+        """修改策略（启用状态 / 过期时间 / 关联群增删 / 备注）。"""
+        return await self._request(
+            "PATCH",
+            self.STRATEGY_PATH + "/{strategy_id}",
+            caller=caller,
+            path_params={"strategy_id": strategy_id},
+            json_body=dict(payload),
+            write=True,
+        )
+
+    async def delete_approval_strategy(
+        self, strategy_id: str, *, caller: str = "policy"
+    ) -> dict[str, Any]:
+        """删除策略。"""
+        return await self._request(
+            "DELETE",
+            self.STRATEGY_PATH + "/{strategy_id}",
+            caller=caller,
+            path_params={"strategy_id": strategy_id},
+            write=True,
+        )
+
+    async def execute_approval_strategy(
+        self, strategy_id: str, *, caller: str = "policy"
+    ) -> dict[str, Any]:
+        """触发策略全量扫描（异步，官方说明约 10 分钟完成）。"""
+        return await self._request(
+            "POST",
+            self.STRATEGY_PATH + "/{strategy_id}/execute",
+            caller=caller,
+            path_params={"strategy_id": strategy_id},
+            json_body={},
+            write=True,
+        )
+
+    async def update_strategy_whitelist(
+        self,
+        strategy_id: str,
+        *,
+        op: str,
+        users: list[str],
+        caller: str = "policy",
+    ) -> dict[str, Any]:
+        """批量新增/删除策略白名单号码（单次 ≤10000）。"""
+        return await self._request(
+            "POST",
+            self.STRATEGY_PATH + "/{strategy_id}/whitelist_users",
+            caller=caller,
+            path_params={"strategy_id": strategy_id},
+            json_body={
+                "op": "del" if op == "del" else "add",
+                "whitelist_users": [str(user) for user in users][:10000],
+            },
+            write=True,
+        )
+
     # ---------------- 能力探测 ----------------
     async def probe(self, group_id: str, *, caller: str = "probe") -> dict[str, CapabilityResult]:
         """逐项探测该群可用的平台能力。
