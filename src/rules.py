@@ -145,6 +145,11 @@ LEET_WATCH_WORDS = (
     "福利",
 )
 
+#: 渠道视图：只去掉空白与各种括号，**保留冒号等分隔符**。
+#: 混淆写法常把 "V：test_invest" 拆成 "V：\n[ t e s t _ i n v e s t ]"，
+#: 而 compact 视图会连冒号一起删掉（→ "vtestinvest"），导致联系方式识别失效。
+_CHANNEL_STRIP_RE = re.compile(r"[\s\[\]\(\)（）【】「」｛｝《》<>]")
+
 #: 真实可触达渠道：只有出现这些才谈得上"引流/诈骗实施"
 CHANNEL_MARKERS = (
     "链接",
@@ -617,6 +622,107 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
         "category": "诈骗赌博",
         "severity": 4,
         "action": ["warn", "recall", "mute"],
+    },
+    {
+        # 实测："媺國原裝偉哥 1粒見效 持玖4曉 純兲嘫無副莋鼡 bǎo密髮貨
+        # 芣滿噫tuì 佲📞138xxxx"（繁体+异体+全角混淆）
+        "id": "ad_medicine",
+        "name": "药品保健品广告",
+        "all_of": [
+            {
+                "any_of": [
+                    "伟哥",
+                    "壮阳",
+                    "延时",
+                    "持久",
+                    "一粒见效",
+                    "1粒见效",
+                    "无副作用",
+                    "保密发货",
+                    "无效退款",
+                    "不满意退",
+                    "原装进口",
+                    "男用",
+                    "增大",
+                    "双效",
+                    "印度神油",
+                    "万艾可",
+                    "希爱力",
+                    "保健品",
+                ]
+            },
+            {
+                "any_of": [
+                    "电话",
+                    "订购",
+                    "联系",
+                    "加v",
+                    "微信",
+                    "发货",
+                    "包邮",
+                    "货到付款",
+                    "咨询",
+                    "抢购",
+                ]
+            },
+        ],
+        "score": 55,
+        "category": "广告引流",
+        "severity": 3,
+        "action": ["warn", "recall"],
+    },
+    {
+        # 实测："內募消息 帶沵進圈孖 一対一 仴収益稳萣30%+ 實盤驗証珂查
+        # 出金不鎖倉 財務自由 僅限10人 咨詢V 備注理財"（非法荐股/理财诈骗）
+        "id": "ad_stock_scam",
+        "name": "荐股理财诈骗",
+        "all_of": [
+            {
+                "any_of": [
+                    "内幕消息",
+                    "内幕",
+                    "带盘",
+                    "实盘验证",
+                    "出金",
+                    "锁仓",
+                    "财务自由",
+                    "月收益",
+                    "稳定收益",
+                    "稳赚",
+                    "名额有限",
+                    "仅限",
+                    "荐股",
+                    "拉升",
+                    "建仓",
+                    "私募",
+                    "游资",
+                    "龙头股",
+                    "尾盘",
+                    "带队",
+                ]
+            },
+            {
+                "any_of": [
+                    "收益",
+                    "理财",
+                    "股票",
+                    "投资",
+                    "资金",
+                    "实盘",
+                    "名额",
+                    "内部",
+                    "咨询",
+                    "备注",
+                    "一对一",
+                ]
+            },
+        ],
+        "score": 55,
+        "category": "诈骗赌博",
+        "severity": 4,
+        "action": ["warn", "recall", "mute"],
+        # 必须有真实渠道（链接/联系方式），避免把"内幕""名额有限"这类日常词误判
+        "require_channel": True,
     },
     {
         # 研究：网络放贷/征信修复类诈骗话术（同样要求组合，避免误伤讨论）
@@ -1117,10 +1223,14 @@ class RuleEngine:
                 )
 
         # 渠道存在性提前计算：供模板的 require_channel 判断（链接/联系方式/渠道词）
-        link_present = bool(LINK_RE.search(views.raw or ""))
+        channel_view = _CHANNEL_STRIP_RE.sub("", views.raw or "")
+        link_present = bool(
+            LINK_RE.search(views.raw or "") or LINK_RE.search(channel_view)
+        )
         contact_present = bool(
             CONTACT_RE.search(views.raw or "")
             or CONTACT_RE.search(views.compact)
+            or CONTACT_RE.search(channel_view)
         )
         channel_present = link_present or contact_present or any(
             word in views.skeleton or word in views.compact
@@ -1167,10 +1277,10 @@ class RuleEngine:
                     )
                 )
 
-        if LINK_RE.search(views.raw or ""):
+        if link_present:
             result.has_link = True
             result.signals["link"] = SCORE_RULES["link"]
-        if CONTACT_RE.search(views.raw or "") or CONTACT_RE.search(views.compact):
+        if contact_present:
             result.has_contact = True
             result.signals["contact"] = SCORE_RULES["contact"]
         digit_run = longest_digit_run(text or "")
