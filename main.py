@@ -962,6 +962,19 @@ class QQGroupManager(Star):
             hard_actions = list(hard_actions)
         else:
             days = self._days_in_group(group_id, sender_openid)
+            # 玩梗 / 讨论 / 引用语境且没有任何真实渠道 → 不送 LLM 复审。
+            # 实测：银行短信梗、"v我50"、AI 越狱文案被按字面判成诈骗并被禁言/举报。
+            joke_hint = bool(getattr(evaluation, "joke_context", False))
+            if joke_hint and not (
+                evaluation.has_link or evaluation.has_contact
+            ):
+                self.logger.info(
+                    "规则评估：疑似玩梗/讨论语境，跳过 LLM 复审"
+                    "（score=%s 信号=%s）",
+                    evaluation.score,
+                    list(evaluation.signals),
+                )
+                return
             should_send = self.moderator.should_send(
                 # rule_hit 只认规则/模板命中；外链、联系方式、刷屏等内置信号通过
                 # risk>=N 或各自的条件（has_link / has_contact / flood）触发，
@@ -992,7 +1005,15 @@ class QQGroupManager(Star):
                 sender_role=sender_role,
                 group_name=config.name,
                 rules_brief=config.rules_brief or str(settings.get("group_rules_brief") or ""),
-                rule_summary=evaluation.summary(),
+                rule_summary=(
+                    evaluation.summary()
+                    + (
+                        "（疑似玩梗/引用语境：请确认是否存在真实收款渠道与索要行为，"
+                        "仅模仿格式或讨论不得判违规）"
+                        if joke_hint
+                        else ""
+                    )
+                ),
                 message_kind=kind,
                 recent_messages=recent,
                 days_in_group=days,

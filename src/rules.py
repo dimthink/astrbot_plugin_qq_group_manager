@@ -40,13 +40,68 @@ LINK_RE = re.compile(
 )
 
 CONTACT_RE = re.compile(
-    r"(?:扣扣|抠抠|qq|q群|企鹅|微信|weixin|wechat|vx|wx|v信|威信|telegram|tg|纸飞机)"
+    # 强别名（本身不像普通英文单词）允许直接跟账号
+    r"(?:扣扣|抠抠|q群|企鹅|微信|weixin|wechat|v信|威信|telegram|纸飞机)"
     r"\s*[:：号]?\s*[0-9a-zA-Z_-]{4,}"
+    # 短别名（qq/tg/wx/vx）必须自成词：否则 "cha**tg**ptclaude…" 会误命中
+    # （实测事故：AI 玩梗文案因 chatgpt 被判 contact → 送审 → 误判诈骗）
+    r"|(?<![0-9a-zA-Z])(?:qq|tg|wx|vx)(?![0-9a-zA-Z])\s*[:：号]?\s*[0-9a-zA-Z_-]{4,}"
     r"|(?:[vV]\s*[:：]\s*[0-9a-zA-Z_-]{4,})"
     r"|(?:群号|裙号)\s*[:：]?\s*\d{5,}"
     r"|(?:1[3-9]\d{9})"
     r"|(?:wxid_[0-9a-zA-Z_-]+)",
     re.IGNORECASE,
+)
+
+#: 真实可触达渠道：只有出现这些才谈得上"引流/诈骗实施"
+CHANNEL_MARKERS = (
+    "链接",
+    "网址",
+    "二维码",
+    "扫码",
+    "群号",
+    "加群",
+    "进群",
+    "加我",
+    "加你",
+    "加v",
+    "加薇",
+    "加微",
+    "微信",
+    "威信",
+    "qq",
+    "扣扣",
+    "私聊",
+    "私信",
+    "私我",
+    "公众号",
+    "主页",
+    "头像",
+    "电话",
+    "手机号",
+    "下载",
+)
+
+#: 玩梗语境：模仿诈骗/银行短信格式、经典梗、AI 越狱文案。命中后不应按违规处理。
+MEME_PATTERNS = (
+    re.compile(r"银行.{0,6}(?:您好|通知).{0,40}余额"),
+    re.compile(r"余额为\s*[0-9０-９]{3,}"),
+    re.compile(r"预警阈值"),
+    re.compile(r"[vV]\s*我\s*[0-9]"),
+    re.compile(r"疯狂星期四"),
+    re.compile(r"(?:肯德基|KFC).{0,10}银行"),
+    re.compile(r"逃逸.{0,30}(?:转账|转我|打钱|赞助)"),
+    re.compile(r"(?:0day|0\s*day).{0,40}(?:转账|转我|打钱)"),
+    re.compile(r"(?:我是|我是?)\s*(?:GPT|ChatGPT|克劳德|Claude|Gemini)[\s0-9]*[A-Za-z]?", re.IGNORECASE),
+    re.compile(r"(?:不设限额|无限额度).{0,10}(?:Codex|额度)"),
+)
+
+#: 讨论/引用/提醒语境：只是在谈论诈骗，不是在实施。
+DISCUSSION_PATTERNS = (
+    re.compile(r"在诈骗|是诈骗|诈骗啊|诈骗吗|诈骗吧|诈骗梗|反诈|防诈|被骗|骗子|典型的诈骗"),
+    re.compile(r"标记为(?:最高)?风险"),
+    re.compile(r"这是.{0,6}诈骗(?:信息|短信|消息|案例)"),
+    re.compile(r"(?:冒充|假冒).{0,8}(?:客服|银行|公安|官方)"),  # 提醒他人注意
 )
 
 #: 引导动作词（"去哪里"）
@@ -116,7 +171,6 @@ BAIT_NOUNS = (
     "裸聊",
     "约炮",
     "看片",
-    "片",
     "影视",
     "种子",
     "磁力",
@@ -129,9 +183,7 @@ BAIT_NOUNS = (
     "新片",
     "老片",
     "链接",
-    "app",
     "地址",
-    "在线",
     "资源站",
     "内部",
     "冷门",
@@ -212,6 +264,8 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
             {"any_of": list(INVITE_VERBS)},
             {"any_of": [*BAIT_NOUNS, *SPAM_MARKERS]},
         ],
+        # 必须有真实渠道才算引流："关注+app"这类泛词组合曾把银行短信梗误判
+        "require_channel": True,
         "score": 50,
         "category": "广告引流",
         "severity": 3,
@@ -224,6 +278,7 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
             {"any_of": list(SPAM_MARKERS)},
             {"any_of": list(BAIT_NOUNS)},
         ],
+        "require_channel": True,
         "score": 55,
         "category": "广告引流",
         "severity": 3,
@@ -367,6 +422,8 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
 ]
 
 SCORE_RULES: dict[str, int] = {
+    # 玩梗/讨论语境下的分数上限（低于送审阈值，直接放行）
+    "meme_cap": 20,
     "exact": 100,
     "normalized": 70,
     "pinyin": 60,
@@ -453,6 +510,10 @@ class RuleEvaluation:
     views: dict[str, str] = field(default_factory=dict)
     has_link: bool = False
     has_contact: bool = False
+    #: 是否出现"真实可触达渠道"（链接/联系方式/群号/二维码等）
+    has_channel: bool = False
+    #: 是否判定为玩梗/讨论/引用语境（此时不应按违规处理）
+    joke_context: bool = False
     repeated: bool = False
     long_text: bool = False
     flood: bool = False
@@ -643,6 +704,7 @@ class RuleEngine:
                         str(action) for action in (item.get("action") or []) if str(action)
                     ],
                     "enabled": bool(item.get("enabled", True)),
+                    "require_channel": bool(item.get("require_channel", False)),
                 }
             )
         return compiled
@@ -819,8 +881,20 @@ class RuleEngine:
                     )
                 )
 
+        # 渠道存在性提前计算：供模板的 require_channel 判断（链接/联系方式/渠道词）
+        link_present = bool(LINK_RE.search(views.raw or ""))
+        contact_present = bool(
+            CONTACT_RE.search(views.raw or "")
+            or CONTACT_RE.search(views.compact)
+        )
+        channel_present = link_present or contact_present or any(
+            word in views.skeleton or word in views.compact
+            for word in CHANNEL_MARKERS
+        )
         for template in self._templates:
             if not template["enabled"]:
+                continue
+            if template.get("require_channel") and not channel_present:
                 continue
             matched_words: list[str] = []
             ok = True
@@ -876,7 +950,13 @@ class RuleEngine:
         verb_hits = [word for word in INVITE_VERBS if word in skeleton]
         bait_hits = [word for word in BAIT_NOUNS if word in skeleton]
         marker_hits = [word for word in SPAM_MARKERS if word in skeleton or word in compact]
-        if verb_hits and bait_hits:
+        # 真实渠道判定：链接/联系方式，或文本中出现渠道词（群号、加v、二维码…）。
+        # 无渠道时"动词+诱饵"不足以判定引流，避免玩笑/短信梗被误判。
+        has_channel = bool(result.has_link or result.has_contact) or any(
+            word in skeleton or word in compact for word in CHANNEL_MARKERS
+        )
+        result.has_channel = has_channel
+        if verb_hits and bait_hits and has_channel:
             result.signals["invite_bait"] = SCORE_RULES["invite_bait"]
         if marker_hits:
             result.signals["spam_marker"] = SCORE_RULES["spam_marker"]
@@ -909,6 +989,19 @@ class RuleEngine:
             result.signals["long_text"] = SCORE_RULES["long_text"]
 
         score += sum(result.signals.values())
+
+        # 玩梗 / 讨论 / 引用语境识别：
+        # - 模仿银行短信、经典梗（v我50）、AI 越狱文案 → 不是违规实施；
+        # - "你怎么在诈骗啊""这是典型的诈骗信息" → 只是谈论或提醒。
+        # 命中且**没有任何真实渠道**时压低分数，避免送 LLM 复审后被按字面判违规。
+        raw_text = text or ""
+        meme_hit = any(pattern.search(raw_text) for pattern in MEME_PATTERNS)
+        discuss_hit = any(pattern.search(raw_text) for pattern in DISCUSSION_PATTERNS)
+        if meme_hit or discuss_hit:
+            result.joke_context = True
+            result.signals["meme_context" if meme_hit else "discussion_context"] = 0
+            if not (result.has_link or result.has_contact):
+                score = min(score, SCORE_RULES.get("meme_cap", 20))
         result.score = min(100, score)
         return result
 
