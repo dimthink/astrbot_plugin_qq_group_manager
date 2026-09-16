@@ -335,13 +335,20 @@ def digits_of(text: str) -> str:
 
 
 def longest_digit_run(text: str) -> int:
-    """最长连续数字串长度（中文数字也计入）。"""
+    """最长**真正连续**的数字串长度（中文数字也计入）。
+
+    注意：必须在归一化文本上逐字符扫描。早期实现先把全文数字抽出来拼成一个
+    纯数字串再数连续，等价于"全文数字总数"，于是任何包含若干数字的正常消息
+    （价格、年份、班号、电话号码片段…）都会被算成"8 位以上长号码"，
+    误加 digit_run 信号（实测把家教/招聘信息误判为广告）。
+    """
     best = 0
     current = 0
-    for char in digits_of(text):
-        current += 1
-        best = max(best, current)
-        if not char.isdigit():
+    for char in compact_text(text):
+        if char.isdigit() or char in CN_DIGITS:
+            current += 1
+            best = max(best, current)
+        else:
             current = 0
     return best
 

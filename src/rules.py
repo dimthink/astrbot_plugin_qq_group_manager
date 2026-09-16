@@ -55,6 +55,73 @@ CONTACT_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: 招聘/家教语境的结构化字段。群内 CS 学生接家教、学校/机构招老师是正常内容，
+#: 其中"加微信 / 联系v:"是**信息本体**而不是引流手段，需要与广告区分开。
+#: 单靠"家教"两个字不算，要求命中 >= RECRUIT_MIN_MARKERS 个不同标记。
+RECRUIT_MARKERS = (
+    "辅导科目",
+    "学员情况",
+    "时间安排",
+    "教员要求",
+    "老师薪水",
+    "课时费",
+    "薪资待遇",
+    "招聘",
+    "家教",
+    "代课",
+    "教员",
+    "学员",
+    "授课",
+    "试课",
+    "任教",
+    "岗位",
+    "任职要求",
+    "五险一金",
+    "本科及以上",
+    "学历",
+    "小初高",
+    "一对一",
+    "辅导老师",
+    "招聘教师",
+    "竞赛教练",
+    "杯赛带教",
+)
+
+#: 出现这些说明是真实引流/灰产内容：即便带招聘字段也不豁免。
+RECRUIT_REJECT = (
+    "资源",
+    "福利",
+    "裸聊",
+    "约炮",
+    "看片",
+    "博彩",
+    "彩票",
+    "刷单",
+    "返利",
+    "垫付",
+    "外挂",
+    "破解",
+    "私服",
+    "彩金",
+    "首充",
+    "种子",
+    "磁力",
+    "防失联",
+    "备用群",
+    "内部群",
+    "免费领取",
+    "点击领取",
+    "扫码领取",
+    "加群领取",
+    "日结",
+    "代收",
+    "跑分",
+)
+
+#: 豁免门槛：至少命中几个招聘标记、正文至少多长
+RECRUIT_MIN_MARKERS = 2
+RECRUIT_MIN_LENGTH = 30
+
 #: leet/中英混排折叠后要重点核对的违规词（研究：手法六 赌b0、色q1ng）
 LEET_WATCH_WORDS = (
     "seqing",
@@ -606,6 +673,8 @@ SCORE_RULES: dict[str, int] = {
     "leet_bypass": 45,
     #: emoji 暗号（研究：手法五）
     "emoji_hint": 20,
+    #: 招聘/家教语境下的分数上限（低于送审阈值）
+    "recruit_cap": 20,
 }
 
 SIGNAL_LABELS = {
@@ -675,6 +744,8 @@ class RuleEvaluation:
     has_channel: bool = False
     #: 是否判定为玩梗/讨论/引用语境（此时不应按违规处理）
     joke_context: bool = False
+    #: 是否判定为招聘/家教语境（联系方式是信息本体，不应按引流处理）
+    recruit_context: bool = False
     repeated: bool = False
     long_text: bool = False
     flood: bool = False
@@ -1168,9 +1239,31 @@ class RuleEngine:
         # - "你怎么在诈骗啊""这是典型的诈骗信息" → 只是谈论或提醒。
         # 命中且**没有任何真实渠道**时压低分数，避免送 LLM 复审后被按字面判违规。
         raw_text = text or ""
+
+        # 招聘/家教语境：结构化字段 + 无外链 + 无灰产诱饵 → 按正常内容处理。
+        # 例：辅导科目/学员情况/时间安排/教员要求/老师薪水 + 联系v:xxx
+        recruit_markers = [
+            word for word in RECRUIT_MARKERS if word in skeleton or word in compact
+        ]
+        if (
+            len(recruit_markers) >= RECRUIT_MIN_MARKERS
+            and len(raw_text) >= RECRUIT_MIN_LENGTH
+            and not result.has_link
+            and not any(word in skeleton or word in compact for word in RECRUIT_REJECT)
+        ):
+            result.recruit_context = True
+            result.signals["recruit_context"] = 0
+            score = min(score, SCORE_RULES.get("recruit_cap", 20))
+            # 家教正文里的"加微+网课"是联系方式与课程本身，撤销广告类模板命中
+            result.hits = [
+                hit
+                for hit in result.hits
+                if hit.category not in ("广告引流", "诈骗赌博")
+            ]
+
         meme_hit = any(pattern.search(raw_text) for pattern in MEME_PATTERNS)
         discuss_hit = any(pattern.search(raw_text) for pattern in DISCUSSION_PATTERNS)
-        if meme_hit or discuss_hit:
+        if (meme_hit or discuss_hit) and not result.recruit_context:
             result.joke_context = True
             result.signals["meme_context" if meme_hit else "discussion_context"] = 0
             if not (result.has_link or result.has_contact):

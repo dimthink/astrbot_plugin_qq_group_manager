@@ -965,6 +965,16 @@ class QQGroupManager(Star):
             # 玩梗 / 讨论 / 引用语境且没有任何真实渠道 → 不送 LLM 复审。
             # 实测：银行短信梗、"v我50"、AI 越狱文案被按字面判成诈骗并被禁言/举报。
             joke_hint = bool(getattr(evaluation, "joke_context", False))
+            # 招聘/家教语境：群内学生接家教、学校招老师是正常内容，
+            # 其中"加微信/联系v:"是信息本体 —— 只要没有外链就不送 LLM 复审，
+            # 否则会被按"私聊引流"判违规（实测误杀）。
+            if bool(getattr(evaluation, "recruit_context", False)) and not evaluation.has_link:
+                self.logger.info(
+                    "规则评估：招聘/家教语境，跳过 LLM 复审（score=%s 信号=%s）",
+                    evaluation.score,
+                    list(evaluation.signals),
+                )
+                return
             if joke_hint and not (
                 evaluation.has_link or evaluation.has_contact
             ):
