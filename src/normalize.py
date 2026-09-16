@@ -157,6 +157,20 @@ _EMOJI_RE = re.compile(
 
 _WORD_RE = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
 
+#: 符号形式的"加"：必须在去噪**之前**映射成汉字。
+#: 否则 ➕/✚ 会落进 _EMOJI_RE 区间被当表情删掉、+ 会被当干扰符删掉，
+#: 规则层就完全看不到"加v/加微"（实测漏检：`资料 ➕v shhdjdkl`）。
+_PLUS_TO_JIA = str.maketrans(
+    {
+        "➕": "加",  # U+2795 heavy plus（在 _EMOJI_RE 区间内）
+        "✚": "加",  # U+271A heavy greek cross
+        "＋": "加",  # 全角加号
+        "﹢": "加",  # 小号加号
+        "ᐩ": "加",  # 加拿大音节文字加号
+        "+": "加",  # 半角加号
+    }
+)
+
 #: 中文数字（用于识别用汉字写的号码）
 CN_DIGITS = "零一二三四五六七八九〇两"
 
@@ -216,7 +230,9 @@ def _strip_noise(text: str) -> str:
 
 def compact_text(text: str, *, keep_case: bool = False) -> str:
     """compact 视图：NFKC + 去噪 + 去干扰符（默认转小写）。"""
-    value = unicodedata.normalize("NFKC", _strip_noise(text or ""))
+    value = unicodedata.normalize(
+        "NFKC", _strip_noise((text or "").translate(_PLUS_TO_JIA))
+    )
     if not keep_case:
         value = value.lower()
     return "".join(char for char in value if char not in _INTERFERENCE)
