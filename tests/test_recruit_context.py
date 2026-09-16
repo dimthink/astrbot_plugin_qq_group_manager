@@ -94,3 +94,50 @@ def test_real_ads_keep_firing(engine):
         evaluation = engine.evaluate(text=text, group_id="demo")
         assert evaluation.recruit_context is False, text
         assert evaluation.score >= 70 or evaluation.template_hits, text
+
+
+# ------------------------------------------------------------------
+# 群发式中介：同一文案被多个不同成员发送时不豁免
+# ------------------------------------------------------------------
+MASS_RECRUIT = """您好，北京各区线下家教代课老师愿意吗，主要负责小初高学生，工资高，
+工作时间灵活自由，北京各区就近安排合适的岗位，如果愿意可以交换一下微信，你加我微信即可"""
+
+
+def test_mass_sent_recruit_text_is_not_exempt(engine):
+    """3 个不同成员发同一文案（达到 duplicate_flood_members=3）→ 按群发广告处理。"""
+    evaluation = engine.evaluate(
+        text=MASS_RECRUIT, group_id="demo", duplicate_senders=3, duplicate_members=3
+    )
+    assert evaluation.recruit_context is False
+    assert "recruit_mass_send" in evaluation.signals
+    assert "duplicate_content" in evaluation.signals
+    assert evaluation.score >= 70 or evaluation.template_hits
+
+
+def test_mass_sent_tutor_post_is_not_exempt(engine):
+    """连正当的家教帖，被多人同时群发也算群发。"""
+    evaluation = engine.evaluate(
+        text=LEGIT["家教-六年级奥数"], group_id="demo",
+        duplicate_senders=3, duplicate_members=3,
+    )
+    assert evaluation.recruit_context is False
+    assert "recruit_mass_send" in evaluation.signals
+
+
+def test_single_sender_repeated_post_still_exempt(engine):
+    """同一个人连发多次（不同成员数仍为 1）不应被判群发。"""
+    evaluation = engine.evaluate(
+        text=MASS_RECRUIT, group_id="demo", duplicate_senders=1, duplicate_members=3
+    )
+    assert evaluation.recruit_context is True
+    assert "recruit_mass_send" not in evaluation.signals
+    assert evaluation.score < 70
+
+
+def test_below_member_threshold_still_exempt(engine):
+    """2 个成员未达阈值（3）→ 仍豁免，避免误伤朋友之间转发。"""
+    evaluation = engine.evaluate(
+        text=MASS_RECRUIT, group_id="demo", duplicate_senders=2, duplicate_members=3
+    )
+    assert evaluation.recruit_context is True
+    assert evaluation.score < 70

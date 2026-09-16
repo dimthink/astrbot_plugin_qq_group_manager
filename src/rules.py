@@ -675,6 +675,8 @@ SCORE_RULES: dict[str, int] = {
     "emoji_hint": 20,
     #: 招聘/家教语境下的分数上限（低于送审阈值）
     "recruit_cap": 20,
+    #: 招聘/家教文案被多个不同成员在窗口内群发（中介扫群），不豁免
+    "recruit_mass_send": 35,
 }
 
 SIGNAL_LABELS = {
@@ -1245,12 +1247,17 @@ class RuleEngine:
         recruit_markers = [
             word for word in RECRUIT_MARKERS if word in skeleton or word in compact
         ]
-        if (
+        recruit_like = (
             len(recruit_markers) >= RECRUIT_MIN_MARKERS
             and len(raw_text) >= RECRUIT_MIN_LENGTH
             and not result.has_link
             and not any(word in skeleton or word in compact for word in RECRUIT_REJECT)
-        ):
+        )
+        if recruit_like and result.duplicate_content:
+            # 同一条招聘/家教文案在窗口内被**多个不同成员**发送 = 中介扫群群发，
+            # 与"个人发一条家教帖"性质不同，因此不豁免；额外给出可解释的信号。
+            result.signals["recruit_mass_send"] = SCORE_RULES["recruit_mass_send"]
+        elif recruit_like:
             result.recruit_context = True
             result.signals["recruit_context"] = 0
             score = min(score, SCORE_RULES.get("recruit_cap", 20))
