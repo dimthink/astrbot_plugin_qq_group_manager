@@ -136,6 +136,12 @@ MULTI_PHRASES: dict[str, str] = {
     "口我": "哦",
     "月永": "朋",
     "票风": "飘",
+    # 拆字组合（研究：广告/赌博内容常用偏旁拆分绕过滤）
+    "力口": "加",
+    "贝者": "赌",
+    "木木": "林",
+    "口贝": "呗",
+    "禾中": "种",
 }
 
 #: 干扰符号（compact 视图会去掉）：空白、常见标点、装饰符号
@@ -156,6 +162,31 @@ _EMOJI_RE = re.compile(
 )
 
 _WORD_RE = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
+
+#: 中英混排/leet 折叠（研究：手法六）：把数字/符号还原成字母，
+#: 使 "色q1ng"→"色qing"、"赌b0"→"赌bo"，从而能被拼音/关键词视图命中。
+_LEET_FOLD = str.maketrans(
+    {
+        "0": "o",
+        "1": "i",
+        "3": "e",
+        "4": "a",
+        "5": "s",
+        "6": "g",
+        "7": "t",
+        "8": "b",
+        "9": "g",
+        "@": "a",
+        "$": "s",
+        "!": "i",
+        "|": "l",
+    }
+)
+
+
+def leet_fold(text: str) -> str:
+    """把 leet/数字替代还原为字母（仅用于匹配，不改动原文）。"""
+    return (text or "").translate(_LEET_FOLD)
 
 #: 符号形式的"加"：必须在去噪**之前**映射成汉字。
 #: 否则 ➕/✚ 会落进 _EMOJI_RE 区间被当表情删掉、+ 会被当干扰符删掉，
@@ -212,6 +243,8 @@ class NormalizedText:
     compact: str = ""
     skeleton: str = ""
     pinyin: str = ""
+    #: leet/中英混排折叠后的 compact（用于识别 色q1ng 这类写法）
+    leet: str = ""
     homoglyph_hits: list[str] = field(default_factory=list)
 
     def views(self) -> list[str]:
@@ -276,9 +309,16 @@ def normalize(
     raw = text or ""
     compact = compact_text(raw)
     skeleton, hits = skeleton_text(raw, homoglyph)
-    pinyin = to_pinyin_skeleton(compact) if with_pinyin else ""
+    folded = leet_fold(compact)
+    # 拼音视图基于折叠后的文本：这样 "色q1ng" 也能算出 seqing 命中拼音规则
+    pinyin = to_pinyin_skeleton(folded) if with_pinyin else ""
     return NormalizedText(
-        raw=raw, compact=compact, skeleton=skeleton, pinyin=pinyin, homoglyph_hits=hits
+        raw=raw,
+        compact=compact,
+        skeleton=skeleton,
+        pinyin=pinyin,
+        leet=folded,
+        homoglyph_hits=hits,
     )
 
 

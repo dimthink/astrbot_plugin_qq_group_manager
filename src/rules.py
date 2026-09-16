@@ -55,6 +55,29 @@ CONTACT_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: leet/中英混排折叠后要重点核对的违规词（研究：手法六 赌b0、色q1ng）
+LEET_WATCH_WORDS = (
+    "seqing",
+    "dubo",
+    "bocai",
+    "luoliao",
+    "yuepao",
+    "kanpian",
+    "色情",
+    "赌博",
+    "博彩",
+    "裸聊",
+    "约炮",
+    "看片",
+    "援交",
+    "彩票",
+    "加群",
+    "加v",
+    "加微",
+    "资源",
+    "福利",
+)
+
 #: 真实可触达渠道：只有出现这些才谈得上"引流/诈骗实施"
 CHANNEL_MARKERS = (
     "链接",
@@ -82,6 +105,16 @@ CHANNEL_MARKERS = (
     "电话",
     "手机号",
     "下载",
+    # 加v 家族变体（研究：形近/符号/中英混排写法）
+    "加vx",
+    "加wx",
+    "加qq",
+    "薇信",
+    "徽信",
+    "v信",
+    "抠抠",
+    "企鹅号",
+    "电报",
 )
 
 #: 玩梗语境：模仿诈骗/银行短信格式、经典梗、AI 越狱文案。命中后不应按违规处理。
@@ -189,6 +222,16 @@ BAIT_NOUNS = (
     "资源站",
     "内部",
     "冷门",
+    # 灰产/赌博诱饵（研究：黑产黑话）
+    "出款",
+    "下款",
+    "洗码",
+    "返水",
+    "内部号",
+    "带单",
+    "跟单",
+    "四件套",
+    "话费卡",
 )
 
 #: 黑话/暗语标记（单独出现不算，但与他项组合即为强信号）
@@ -421,6 +464,118 @@ BUILTIN_TEMPLATES: list[dict[str, Any]] = [
         "severity": 5,
         "action": ["warn", "recall", "mute", "report"],
     },
+    {
+        # 研究：手法五——用 emoji 组合暗示违规（🍑💦🔞🎰💰🃏）。
+        # 必须与诱饵/渠道词同时出现才算，避免误伤日常用表情的聊天。
+        "id": "ad_emoji",
+        "name": "emoji 暗号引流",
+        "all_of": [
+            {"any_of": ["🔞", "🍑", "🎰", "🃏", "👙", "🍆", "💦", "🎲", "🚗"]},
+            {"any_of": [*BAIT_NOUNS, *CHANNEL_MARKERS, "群", "号", "码"]},
+        ],
+        "score": 45,
+        "category": "广告引流",
+        "severity": 3,
+        "action": ["warn", "recall"],
+    },
+    {
+        # 研究：黑产黑话（菠菜/跑分/水房/狗推/接码/卡商…）。
+        # 这些词本身有正常含义（菠菜=蔬菜、跑分=性能测试、上岸=考研），
+        # 因此**只能组合判定**：必须同时出现渠道/交易词。
+        "id": "ad_gamble_slang",
+        "name": "赌博黑话",
+        "all_of": [
+            {
+                "any_of": [
+                    "菠菜盘",
+                    "bc盘",
+                    "bc平台",
+                    "信用盘",
+                    "包杀",
+                    "包赢",
+                    "稳杀",
+                    "龙虎",
+                    "洗码",
+                    "返水",
+                    "狗推",
+                    "狗庄",
+                    "菜农",
+                    "水房",
+                    "接码",
+                    "卡商",
+                    "料商",
+                    "四件套",
+                    "跑分平台",
+                    "跑分车队",
+                    "代收代付",
+                    # 具体组合（避免裸"赌博"误伤讨论；这些词本身已含渠道）
+                    "赌博平台",
+                    "赌博网站",
+                    "博彩平台",
+                    "博彩网站",
+                    # 中英混排/拼音写法（leet 视图折叠后命中）
+                    "赌bo",
+                    "dubo",
+                    "bocai",
+                    "seqing",
+                ]
+            },
+            {
+                # 只放"渠道/交易"类词；刻意不含"平台/网站"这类泛词，
+                # 否则"接码平台是干什么的"这种正常提问会被误命中。
+                "any_of": [
+                    "群",
+                    "群号",
+                    "进群",
+                    "加群",
+                    "网址",
+                    "链接",
+                    "下载",
+                    "私聊",
+                    "加v",
+                    "代理",
+                    "上车",
+                    "出款",
+                    "下款",
+                    "佣金",
+                    "日结",
+                    "收米",
+                    "押金",
+                    "出货",
+                    "收单",
+                ]
+            },
+        ],
+        "score": 55,
+        "category": "诈骗赌博",
+        "severity": 4,
+        "action": ["warn", "recall", "mute"],
+    },
+    {
+        # 研究：网络放贷/征信修复类诈骗话术（同样要求组合，避免误伤讨论）
+        "id": "ad_loan",
+        "name": "放贷诈骗",
+        "all_of": [
+            {
+                "any_of": [
+                    "无抵押",
+                    "秒下款",
+                    "黑户可下",
+                    "包装资料",
+                    "征信修复",
+                    "征信洗白",
+                    "停息挂账",
+                    "内部渠道放款",
+                    "大额低息",
+                ]
+            },
+            {"any_of": [*CHANNEL_MARKERS, "私聊", "咨询", "加v", "代理", "放款", "下款"]},
+        ],
+        "score": 55,
+        "category": "诈骗赌博",
+        "severity": 4,
+        "action": ["warn", "recall", "mute"],
+    },
 ]
 
 SCORE_RULES: dict[str, int] = {
@@ -447,6 +602,10 @@ SCORE_RULES: dict[str, int] = {
     "repeat_chars": 15,
     "long_text": 10,
     "image": 60,
+    #: 中英混排/leet 写法揭示出的违规词（研究：手法六）
+    "leet_bypass": 45,
+    #: emoji 暗号（研究：手法五）
+    "emoji_hint": 20,
 }
 
 SIGNAL_LABELS = {
@@ -840,6 +999,7 @@ class RuleEngine:
                 "compact": views.compact,
                 "skeleton": views.skeleton,
                 "pinyin": views.pinyin,
+                "leet": getattr(views, "leet", ""),
             }
         )
         score = 0
@@ -907,6 +1067,7 @@ class RuleEngine:
                     if needle and (
                         needle in views.skeleton
                         or needle in views.compact
+                        or needle in getattr(views, "leet", "")
                         or word.lower() in (views.raw or "").lower()
                     ):
                         found = word
@@ -983,6 +1144,16 @@ class RuleEngine:
             result.duplicate_content = True
             result.duplicate_senders = duplicate_senders
             result.signals["duplicate_content"] = SCORE_RULES["duplicate_content"]
+        # 中英混排/leet（研究：手法六）：折叠后能看到的违规词，说明原文在规避
+        leet_text = str((result.views or {}).get("leet") or "")
+        if leet_text:
+            leet_hits = [
+                word
+                for word in LEET_WATCH_WORDS
+                if word in leet_text and word not in skeleton
+            ]
+            if leet_hits:
+                result.signals["leet_bypass"] = SCORE_RULES["leet_bypass"]
         if re.search(r"(.)\1{6,}", text or ""):
             result.repeated = True
             result.signals["repeat_chars"] = SCORE_RULES["repeat_chars"]
