@@ -208,6 +208,21 @@ class JoinReviewer:
                 risk="违规内容",
                 source="rule",
             )
+        # 1.5) 跨群黑名单（B5）：在 A 群被拉黑的人，B 群默认也拒绝入群
+        global_check = getattr(self.store, "is_globally_blacklisted", None)
+        if member_openid and callable(global_check) and global_check(member_openid):
+            reason = ""
+            reason_getter = getattr(self.store, "global_blacklist_reason", None)
+            if callable(reason_getter):
+                reason = str(reason_getter(member_openid) or "")
+            return JoinDecision(
+                op="decline",
+                auto=True,
+                confidence=1.0,
+                reason="命中跨群黑名单" + (f"（{reason}）" if reason else ""),
+                risk="违规内容",
+                source="rule",
+            )
         if str(request.get("bot", "")).lower() == "true" or request.get("bot") is True:
             return JoinDecision(
                 op="decline",

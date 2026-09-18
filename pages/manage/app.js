@@ -31,6 +31,7 @@ const VIEWS = [
   { id: 'rulesx', label: '规则增强', icon: '🧬' },
   { id: 'members', label: '成员与禁言', icon: '🚫' },
   { id: 'joins', label: '入群审批', icon: '🚪' },
+  { id: 'appeals', label: '申诉', icon: '⚖️' },
 ];
 
 const LOG_TABS = [
@@ -482,7 +483,7 @@ async function viewGroups(root) {
 /* ------------------------------------------------------------- 日志中心 */
 
 function logColumns(kind) {
-  if (kind === 'events') return ['ts', 'group_id', 'sender_name', 'verdict', 'category', 'severity', 'confidence', 'reason'];
+  if (kind === 'events') return ['ts', 'group_id', 'sender_name', 'verdict', 'category', 'severity', 'confidence', 'reason', 'appeal_state'];
   if (kind === 'actions') return ['ts', 'group_id', 'action', 'target_openid', 'ok', 'err_code', 'dry_run'];
   if (kind === 'api') return ['ts_unix', 'group_id', 'method', 'path', 'ok', 'err_code', 'caller', 'duration_ms'];
   return ['ts_unix', 'group_id', 'capability', 'ok', 'err_code', 'note'];
@@ -499,6 +500,10 @@ function cellValue(kind, key, row) {
   if (key === 'dry_run') return value ? 'dry-run' : '';
   if (key === 'confidence' && typeof value === 'number') return value.toFixed(2);
   if (key === 'path') return String(value || '').replace('/v2/groups/{group_openid}', '');
+  if (key === 'appeal_state') {
+    const labels = { pending: '待处理', accepted: '已通过', rejected: '已驳回' };
+    return labels[value] || (value ? String(value) : '—');
+  }
   return value === null || value === undefined ? '—' : String(value);
 }
 
@@ -538,11 +543,20 @@ async function viewLogs(root) {
   [1, 7, 30].forEach((days) => {
     daysSelect.appendChild(el('option', { value: String(days), text: '近 ' + days + ' 天', selected: String(filters.days) === String(days) ? 'selected' : null }));
   });
+  const appealedSelect = el('select');
+  [['', '申诉：全部'], ['1', '申诉：已申诉'], ['0', '申诉：未申诉']].forEach((pair) => {
+    appealedSelect.appendChild(el('option', {
+      value: pair[0],
+      text: pair[1],
+      selected: String(filters.appealed || '') === pair[0] ? 'selected' : null,
+    }));
+  });
   const applyBtn = el('button', { class: 'btn ghost', text: '筛选', onclick: () => {
     state.logs.filters = {
       group_id: groupInput.value.trim() || undefined,
       keyword: keywordInput.value.trim() || undefined,
       days: daysSelect.value,
+      appealed: appealedSelect.value || undefined,
     };
     loadLogs(kind, 1);
   } });
@@ -561,7 +575,7 @@ async function viewLogs(root) {
   clear(root);
   root.appendChild(card('日志中心', '审核事件与处置将在 M2 之后产生；API 调用与能力受限日志现在即可查看。', [
     tabs,
-    el('div', { class: 'row' }, [groupInput, keywordInput, daysSelect, el('div', { class: 'field-actions' }, [applyBtn, clearBtn, exportBtn])]),
+    el('div', { class: 'row' }, [groupInput, keywordInput, daysSelect, appealedSelect, el('div', { class: 'field-actions' }, [applyBtn, clearBtn, exportBtn])]),
   ]));
 
   if (!data) {
@@ -862,6 +876,12 @@ async function viewPolicy(root) {
   const autoEnforce = checkField('归一化/模板命中直接按规则动作处置（默认关：先送审）', settings.auto_enforce_normalized);
   const dupWindow = numField('同文案多号刷屏窗口（秒）', settings.duplicate_flood_window || 300, 30, 3600, 30);
   const dupMembers = numField('同文案多号刷屏人数阈值', settings.duplicate_flood_members || 3, 2, 20, 1);
+  const domainAllow = checkField('竞赛域名白名单降权（白名单内链接不计 link 分，仍走规则与送审）', settings.domain_allowlist_enabled !== false);
+  const domainArea = el('textarea', { rows: '4', class: 'mono', placeholder: '一行一个域名，例如 codeforces.com' });
+  domainArea.value = (settings.domain_allowlist || []).join('\n');
+  const appealEnabled = checkField('接受成员申诉（申诉 <理由>）', settings.appeal_enabled !== false);
+  const appealAuto = checkField('申诉通过自动加入误判白名单（默认关，可能被社工利用）', settings.appeal_auto_whitelist);
+  const appealNotify = checkField('申诉处理结果回执申诉人', settings.appeal_notify !== false);
   const pinyinHint = el('p', {
     class: 'card-desc',
     text: '同音匹配依赖可选的 pypinyin 库；未安装时该项自动失效（不影响其他规则）。',
@@ -942,6 +962,11 @@ async function viewPolicy(root) {
       auto_enforce_normalized: autoEnforce.input.checked,
       duplicate_flood_window: Number(dupWindow.input.value),
       duplicate_flood_members: Number(dupMembers.input.value),
+      domain_allowlist_enabled: domainAllow.input.checked,
+      domain_allowlist: domainArea.value.split('\n').map((item) => item.trim()).filter(Boolean),
+      appeal_enabled: appealEnabled.input.checked,
+      appeal_auto_whitelist: appealAuto.input.checked,
+      appeal_notify: appealNotify.input.checked,
       prompt_system: systemPrompt.value,
       prompt_user: userPrompt.value,
     };
@@ -975,6 +1000,17 @@ async function viewPolicy(root) {
     el('div', { class: 'row' }, [fuzzyDist.node, riskField.node, dupWindow.node, dupMembers.node]),
     el('div', { class: 'row' }, [autoEnforce.node]),
     pinyinHint,
+  ]));
+
+  root.appendChild(card('竞赛域名白名单', '白名单内的链接不计 link 分（25 分），但**只降权不豁免**：规则、审计与 LLM 送审判断照常执行。', [
+    el('div', { class: 'row' }, [domainAllow.node]),
+    domainArea,
+    el('p', { class: 'card-desc', text: '一行一个域名，按点边界后缀匹配：codeforces.com 命中 m1.codeforces.com，但不命中 fake-codeforces.com。' }),
+  ]));
+
+  root.appendChild(card('申诉闭环', '成员回复被处置消息发送「申诉 <理由>」；群管回复申诉消息发送「申诉通过 / 申诉驳回」。误判白名单默认关闭。', [
+    el('div', { class: 'row' }, [appealEnabled.node, appealNotify.node, appealAuto.node]),
+    el('p', { class: 'card-desc', text: '申诉通过会自动解禁（若该事件产生过禁言）并追加 appeal_accepted 动作留痕，不删除原审核事件。' }),
   ]));
 
   root.appendChild(card('运行参数', '首次安装默认 dry-run + lenient；确认判定质量后再关闭 dry-run 并切到标准档。', [
@@ -1243,6 +1279,64 @@ async function viewRulesX(root) {
     hgArea,
     el('div', { class: 'field-actions' }, [hgSave]),
   ]));
+
+  /* 误判白名单（申诉通过自动加白） */
+  const wlBox = el('div', { class: 'loading', text: '正在加载申诉白名单…' });
+  const adviceBox = el('p', { class: 'card-desc', text: '正在统计被申诉通过的规则…' });
+  const loadWhitelist = async () => {
+    clear(wlBox);
+    try {
+      const data = await bridge.apiGet('appeal_whitelist');
+      const items = data.items || [];
+      if (!items.length) {
+        wlBox.appendChild(notice('当前没有误判白名单条目。'));
+        return;
+      }
+      const tbody = el('tbody');
+      items.forEach((row) => {
+        const revoke = el('button', { class: 'btn small danger', text: '撤销', onclick: async () => {
+          try {
+            await bridge.apiPost('appeal_whitelist', { op: 'del', digest: row.digest });
+            toast('已撤销', 'ok');
+            await loadWhitelist();
+          } catch (error) { toast('撤销失败：' + error.message, 'bad'); }
+        } });
+        tbody.appendChild(el('tr', {}, [
+          el('td', { class: 'mono', text: String(row.digest || '').slice(0, 24) }),
+          el('td', { text: (row.skeleton || '').slice(0, 40) }),
+          el('td', { text: row.reason || '-' }),
+          el('td', { text: row.added_by || '-' }),
+          el('td', { text: fmtTime(row.added_at ? new Date(row.added_at * 1000).toISOString() : '') }),
+          el('td', {}, [revoke]),
+        ]));
+      });
+      wlBox.appendChild(el('div', { class: 'table-wrap' }, [el('table', {}, [
+        el('thead', {}, [el('tr', {}, ['摘要', '骨架', '原因', '加入者', '时间', '操作'].map((t) => el('th', { text: t })))]),
+        tbody,
+      ])]));
+    } catch (error) { wlBox.appendChild(notice('加载失败：' + error.message, 'bad')); }
+  };
+  const loadAdvice = async () => {
+    try {
+      const data = await bridge.apiGet('appeals', { state: 'accepted', days: 30, limit: 500 });
+      const counts = {};
+      (data.items || []).forEach((row) => {
+        const key = row.category || '未分类';
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, 5);
+      adviceBox.textContent = top.length
+        ? '被申诉通过最多（建议复查规则）：' + top.map((key) => key + ' ' + counts[key] + ' 次').join('、')
+        : '近 30 天没有被申诉通过的记录。';
+    } catch (error) { adviceBox.textContent = '统计失败：' + error.message; }
+  };
+  root.appendChild(card('误判白名单（申诉通过自动加白）',
+    '只有 appeal_auto_whitelist 打开时才会写入；命中白名单的消息跳过 LLM 送审，但仍写审计（verdict=allow / category=whitelisted）。', [
+    wlBox,
+    adviceBox,
+  ]));
+  await loadWhitelist();
+  await loadAdvice();
 }
 
 /* ----------------------------------------------------- 成员与禁言视图 */
@@ -1271,6 +1365,7 @@ async function viewMembers(root) {
   });
 
   const mutesBox = el('div', { class: 'loading', text: '正在加载禁言台账…' });
+  const globalBlacklistBox = el('div', { class: 'loading', text: '正在加载跨群黑名单…' });
   const blacklistBox = el('div', { class: 'loading', text: '正在加载黑名单…' });
   const searchInput = el('input', { type: 'text', placeholder: '昵称关键字或完整 openid' });
   const searchOut = el('pre', { class: 'guide', text: '尚未查询。' });
@@ -1363,6 +1458,52 @@ async function viewMembers(root) {
     }
   };
 
+  const loadGlobalBlacklist = async () => {
+    clear(globalBlacklistBox);
+    try {
+      const data = await bridge.apiGet('global_blacklist');
+      const entries = data.entries || [];
+      const tbody = el('tbody');
+      entries.forEach((row) => {
+        const remove = el('button', { class: 'btn small danger', text: '解除', onclick: async () => {
+          if (!(await uiConfirm('解除后该成员可再次申请入群，确认？'))) return;
+          try {
+            await bridge.apiPost('global_blacklist/update', { op: 'remove', openid: row.openid });
+            toast('已解除', 'ok');
+            await loadGlobalBlacklist();
+          } catch (error) { toast('解除失败：' + error.message, 'bad'); }
+        } });
+        tbody.appendChild(el('tr', {}, [
+          el('td', { text: row.masked || shortId(row.openid) }),
+          el('td', { text: row.reason || '-' }),
+          el('td', { text: row.added_by || '-' }),
+          el('td', { text: fmtTime(row.added_at) }),
+          el('td', {}, [remove]),
+        ]));
+      });
+      const addBtn = el('button', { class: 'btn small', text: '添加', onclick: async () => {
+        const openid = await uiPrompt('请输入要加入跨群黑名单的 member_openid：');
+        if (!openid) return;
+        const reason = await uiPrompt('理由（可留空）：') || '';
+        try {
+          await bridge.apiPost('global_blacklist/update', { op: 'add', openid: openid.trim(), reason });
+          toast('已加入跨群黑名单', 'ok');
+          await loadGlobalBlacklist();
+        } catch (error) { toast('添加失败：' + error.message, 'bad'); }
+      } });
+      globalBlacklistBox.appendChild(el('div', { class: 'muted', text: '跨群黑名单对全插件生效：命中后任意群的入群申请都会被自动拒绝（不会自动移出已在群成员）。' }));
+      globalBlacklistBox.appendChild(el('div', { class: 'table-wrap' }, [
+        el('table', {}, [
+          el('thead', {}, [el('tr', {}, ['成员', '理由', '操作人', '加入时间', '操作'].map((text) => el('th', { text })))]),
+          tbody,
+        ]),
+      ]));
+      globalBlacklistBox.appendChild(el('div', { class: 'field-actions' }, [addBtn]));
+    } catch (error) {
+      globalBlacklistBox.appendChild(notice('加载失败：' + error.message, 'bad'));
+    }
+  };
+
   const searchBtn = el('button', { class: 'btn ghost', text: '查询成员', onclick: async () => {
     searchBtn.disabled = true;
     try {
@@ -1377,12 +1518,13 @@ async function viewMembers(root) {
 
   root.appendChild(card('禁言台账', null, [mutesBox]));
   root.appendChild(card('黑名单', null, [blacklistBox]));
+  root.appendChild(card('跨群黑名单', '对全插件生效：命中后任意群的入群申请都会被自动拒绝；不会自动移出已在群成员。', [globalBlacklistBox]));
   root.appendChild(card('成员查询', '优先查本地缓存（群消息里见过的成员）；输入完整 openid 时会调用平台成员接口（内邀能力）。', [
     el('div', { class: 'row' }, [searchInput, el('div', { class: 'field-actions' }, [searchBtn])]),
     searchOut,
   ]));
 
-  await Promise.all([loadMutes(), loadBlacklist()]);
+  await Promise.all([loadMutes(), loadBlacklist(), loadGlobalBlacklist()]);
 }
 
 /* ------------------------------------------------------- 入群审批视图 */
@@ -1597,6 +1739,95 @@ async function viewJoins(root) {
   ] : [notice(policyData.error ? '无法读取策略列表（接口可能未开放）。' : '当前没有任何策略。')]));
 }
 
+/* --------------------------------------------------------- 申诉处理视图 */
+
+async function viewAppeals(root) {
+  const config = await loadConfig();
+  const groups = config.groups || [];
+  clear(root);
+
+  const stateSelect = el('select');
+  [['pending', '待处理'], ['accepted', '已通过'], ['rejected', '已驳回'], ['all', '全部']]
+    .forEach((pair) => {
+      stateSelect.appendChild(el('option', { value: pair[0], text: pair[1] }));
+    });
+  const groupSelect = el('select');
+  groupSelect.appendChild(el('option', { value: '', text: '全部群' }));
+  groups.forEach((group) => {
+    groupSelect.appendChild(el('option', {
+      value: group.group_id,
+      text: group.name || shortId(group.group_id),
+    }));
+  });
+  const daysSelect = el('select');
+  [7, 30, 90].forEach((days) => {
+    daysSelect.appendChild(el('option', { value: String(days), text: '近 ' + days + ' 天', selected: days === 30 ? 'selected' : null }));
+  });
+
+  const box = el('div', { class: 'loading', text: '正在加载申诉…' });
+  const load = async () => {
+    clear(box);
+    box.appendChild(el('div', { class: 'loading', text: '正在加载申诉…' }));
+    try {
+      const data = await bridge.apiGet('appeals', {
+        state: stateSelect.value,
+        group_id: groupSelect.value || undefined,
+        days: daysSelect.value,
+        limit: 200,
+      });
+      clear(box);
+      const items = data.items || [];
+      if (!items.length) {
+        box.appendChild(notice('该筛选条件下没有申诉记录。'));
+        return;
+      }
+      const decide = async (row, op) => {
+        const note = (await uiPrompt(op === 'accept' ? '通过备注（可选）：' : '驳回理由（可选，会回执申诉人）：')) || '';
+        try {
+          await bridge.apiPost('appeals/decide', { event_id: row.id, op, note });
+          toast(op === 'accept' ? '已通过（若原事件产生过禁言会自动解禁）' : '已驳回', 'ok');
+          await load();
+        } catch (error) { toast('处理失败：' + error.message, 'bad'); }
+      };
+      const tbody = el('tbody');
+      items.forEach((row) => {
+        const detail = el('button', { class: 'btn small ghost', text: '查看原文', onclick: async () => {
+          await uiNotice('原消息', row.text_excerpt || '（未保存正文；可开启 store_text 保存完整正文）');
+        } });
+        const acceptBtn = el('button', { class: 'btn small', text: '通过', onclick: () => decide(row, 'accept') });
+        const rejectBtn = el('button', { class: 'btn small danger', text: '驳回', onclick: () => decide(row, 'reject') });
+        const stateLabel = { pending: '待处理', accepted: '已通过', rejected: '已驳回' }[row.appeal_state] || (row.appeal_state || '-');
+        tbody.appendChild(el('tr', {}, [
+          el('td', { text: fmtTime(row.ts || (row.ts_unix ? new Date(row.ts_unix * 1000).toISOString() : '')) }),
+          el('td', { text: row.group_name || shortId(row.group_id) }),
+          el('td', { text: row.sender_name || shortId(row.sender_openid) }),
+          el('td', { text: (row.appeal_text || '').slice(0, 40) }),
+          el('td', { text: (row.category || '-') + ' / ' + (row.verdict || '-') }),
+          el('td', { text: stateLabel + (row.appeal_by ? '（' + row.appeal_by + '）' : '') }),
+          el('td', {}, [el('div', { class: 'field-actions' }, [detail, acceptBtn, rejectBtn])]),
+        ]));
+      });
+      box.appendChild(el('div', { class: 'table-wrap' }, [el('table', {}, [
+        el('thead', {}, [el('tr', {}, ['时间', '群', '申诉人', '理由', '原判', '状态', '操作'].map((text) => el('th', { text })))]),
+        tbody,
+      ])]));
+    } catch (error) {
+      clear(box);
+      box.appendChild(notice('加载失败：' + error.message, 'bad'));
+    }
+  };
+
+  root.appendChild(card('申诉处理',
+    '成员回复被处置消息发送「申诉 <理由>」；这里的「通过」会自动解禁（若原事件产生过禁言）并追加 appeal_accepted 留痕，不删除原审核事件。', [
+    el('div', { class: 'row' }, [
+      stateSelect, groupSelect, daysSelect,
+      el('div', { class: 'field-actions' }, [el('button', { class: 'btn ghost', text: '刷新', onclick: () => load() })]),
+    ]),
+    box,
+  ]));
+  await load();
+}
+
 /* ------------------------------------------------------------- 占位视图 */
 
 function viewComingSoon(root, view) {
@@ -1630,6 +1861,7 @@ async function render() {
   else if (view.id === 'rulesx') await viewRulesX(root);
   else if (view.id === 'members') await viewMembers(root);
   else if (view.id === 'joins') await viewJoins(root);
+  else if (view.id === 'appeals') await viewAppeals(root);
   else viewComingSoon(root, view);
 }
 

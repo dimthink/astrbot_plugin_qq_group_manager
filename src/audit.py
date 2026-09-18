@@ -55,7 +55,10 @@ DDL_STATEMENTS: tuple[str, ...] = (
       parse_error INTEGER NOT NULL DEFAULT 0,
       appealed INTEGER NOT NULL DEFAULT 0,
       appeal_text TEXT,
-      appeal_state TEXT
+      appeal_state TEXT,
+      appeal_by TEXT,
+      appeal_at REAL,
+      appeal_note TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_events_ts ON mod_events(ts_unix DESC)",
@@ -159,6 +162,15 @@ DDL_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_mutes_until ON mutes(active, until_unix)",
     """
+    CREATE TABLE IF NOT EXISTS appeal_whitelist (
+      digest     TEXT PRIMARY KEY,
+      skeleton   TEXT,
+      reason     TEXT,
+      added_by   TEXT,
+      added_at   REAL NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS stats_daily (
       day TEXT PRIMARY KEY,
       payload TEXT NOT NULL
@@ -170,11 +182,20 @@ DDL_STATEMENTS: tuple[str, ...] = (
 LOG_TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "events": (
         "mod_events",
-        ("group_id", "verdict", "category", "sender_openid", "source", "dry_run", "appealed"),
+        (
+            "group_id",
+            "verdict",
+            "category",
+            "sender_openid",
+            "source",
+            "dry_run",
+            "appealed",
+            "appeal_state",
+        ),
     ),
     "actions": (
         "mod_actions",
-        ("group_id", "action", "ok", "target_openid", "dry_run"),
+        ("group_id", "action", "ok", "target_openid", "dry_run", "event_id"),
     ),
     "api": (
         "api_calls",
@@ -209,6 +230,9 @@ WRITE_COLUMNS: dict[str, tuple[str, ...]] = {
         "dry_run",
         "sampled",
         "parse_error",
+        "appeal_by",
+        "appeal_at",
+        "appeal_note",
     ),
     "actions": (
         "ts_unix",
@@ -247,6 +271,13 @@ WRITE_COLUMNS: dict[str, tuple[str, ...]] = {
         "trace_id",
         "note",
     ),
+}
+
+#: 老库补列（新库由 DDL 建全）；值是对应的 SQLite 列类型
+EVENT_EXTRA_COLUMNS: dict[str, str] = {
+    "appeal_by": "TEXT",
+    "appeal_at": "REAL",
+    "appeal_note": "TEXT",
 }
 
 #: NOT NULL 列的兜底默认值（未提供时避免 IntegrityError）
@@ -328,6 +359,12 @@ class AuditStore:
         conn.execute("PRAGMA foreign_keys=ON")
         for statement in DDL_STATEMENTS:
             conn.execute(statement)
+        # 老库补列（幂等）：失败只记 warning，不阻塞启动
+        try:
+            self._ensure_columns_sync(conn, "mod_events", EVENT_EXTRA_COLUMNS)
+        except Exception as exc:  # pragma: no cover - 迁移失败不应阻塞启动
+            if self.logger is not None:
+                self.logger.warning("审计库补列失败（申诉功能可能不可用）：%s", exc)
         conn.execute(
             "INSERT INTO meta(k, v) VALUES('schema_version', ?) "
             "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
@@ -336,17 +373,47 @@ class AuditStore:
         conn.commit()
         self._conn = conn
 
+    async def _ensure_columns(
+        self, conn: sqlite3.Connection, table: str, columns: dict[str, str]
+    ) -> None:
+        """幂等补列（异步包装，便于测试/外部调用）。"""
+        await asyncio.to_thread(self._ensure_columns_sync, conn, table, columns)
+
+    @staticmethod
+    def _ensure_columns_sync(
+        conn: sqlite3.Connection, table: str, columns: dict[str, str]
+    ) -> None:
+        """幂等补列：PRAGMA 查现有列，缺哪个补哪个（SQLite 支持 ADD COLUMN）。"""
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
     async def close(self, timeout: float = 3.0) -> None:
-        """停止写协程、落盘剩余记录、关闭连接。"""
+        """停止写协程、落盘剩余记录、关闭连接。
+
+        先唤醒写协程并等它自然退出，再关闭连接：sqlite3 连接不支持跨线程并发使用，
+        直接 cancel 会让 `_write` 的线程在后台继续跑，与 close 的 commit/close 竞争
+        （表现为 `cannot commit - no transaction is active`，极端情况会段错误）。
+        """
         self._closed = True
         if self._writer is not None:
-            self._writer.cancel()
+            try:  # 唤醒阻塞在 queue.get 上的写协程
+                self.queue.put_nowait(("__stop__", {}))
+            except asyncio.QueueFull:  # pragma: no cover - 队列满时靠超时退出
+                pass
             try:
                 await asyncio.wait_for(
                     asyncio.gather(self._writer, return_exceptions=True), timeout
                 )
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+                self._writer.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(self._writer, return_exceptions=True), timeout
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
             self._writer = None
         try:
             await asyncio.wait_for(self.flush(), timeout)
@@ -565,8 +632,38 @@ class AuditStore:
         )
         return rows[0] if rows else None
 
-    async def mark_appeal(self, event_id: int, text: str, *, state: str = "pending") -> bool:
-        """给某条审核事件打上申诉标记。"""
+    async def find_event_by_msg_id(self, group_id: str, msg_id: str) -> dict[str, Any] | None:
+        """按被引用消息 ID 找审核事件（申诉优先用 Reply 关联）。"""
+        if not msg_id:
+            return None
+        rows = await self._fetch_all(
+            "SELECT * FROM mod_events WHERE group_id = ? AND msg_id = ? "
+            "ORDER BY ts_unix DESC LIMIT 1",
+            (group_id, msg_id),
+        )
+        return rows[0] if rows else None
+
+    async def get_event(self, event_id: int) -> dict[str, Any] | None:
+        """按事件 ID 取审核事件（管理台处理申诉用）。"""
+        if not event_id:
+            return None
+        rows = await self._fetch_all(
+            "SELECT * FROM mod_events WHERE id = ? LIMIT 1", (int(event_id),)
+        )
+        return rows[0] if rows else None
+
+    async def event_has_action(self, event_id: int, action: str = "mute") -> bool:
+        """该事件是否成功执行过某动作（申诉通过时判断要不要解禁）。"""
+        if not event_id:
+            return False
+        rows = await self._fetch_all(
+            "SELECT id FROM mod_actions WHERE event_id = ? AND action = ? AND ok = 1 LIMIT 1",
+            (int(event_id), str(action)),
+        )
+        return bool(rows)
+
+    async def create_appeal(self, event_id: int, text: str) -> bool:
+        """写 appealed=1 / appeal_text / appeal_state='pending'（不覆盖历史处理备注）。"""
         conn = self._conn
         if conn is None or not event_id:
             return False
@@ -574,10 +671,39 @@ class AuditStore:
             try:
                 await asyncio.to_thread(
                     conn.execute,
-                    "UPDATE mod_events SET appealed = 1, appeal_text = ?, appeal_state = ? "
-                    "WHERE id = ?",
-                    (truncate(text, 200), state, int(event_id)),
+                    "UPDATE mod_events SET appealed = 1, appeal_text = ?, "
+                    "appeal_state = 'pending' WHERE id = ?",
+                    (truncate(text, 200), int(event_id)),
                 )
+                await asyncio.to_thread(conn.commit)
+                return True
+            except Exception as exc:  # pragma: no cover
+                if self.logger is not None:
+                    self.logger.error("写入申诉失败：%s", exc)
+                return False
+
+    async def mark_appeal(self, event_id: int, text: str, *, state: str = "pending") -> bool:
+        """兼容旧调用：pending 走 create_appeal，其余状态只改状态（保留申诉正文）。"""
+        if state == "pending":
+            return await self.create_appeal(event_id, text)
+        conn = self._conn
+        if conn is None or not event_id:
+            return False
+        async with self._lock:
+            try:
+                if text:
+                    await asyncio.to_thread(
+                        conn.execute,
+                        "UPDATE mod_events SET appealed = 1, appeal_state = ?, appeal_text = ? "
+                        "WHERE id = ?",
+                        (state, truncate(text, 200), int(event_id)),
+                    )
+                else:
+                    await asyncio.to_thread(
+                        conn.execute,
+                        "UPDATE mod_events SET appealed = 1, appeal_state = ? WHERE id = ?",
+                        (state, int(event_id)),
+                    )
                 await asyncio.to_thread(conn.commit)
                 return True
             except Exception as exc:  # pragma: no cover
@@ -585,9 +711,183 @@ class AuditStore:
                     self.logger.error("写入申诉标记失败：%s", exc)
                 return False
 
-    async def resolve_appeal(self, event_id: int, *, accepted: bool) -> bool:
-        """标记申诉结果（管理员复核后调用）。"""
-        return await self.mark_appeal(event_id, "", state="accepted" if accepted else "rejected")
+    async def resolve_appeal(
+        self,
+        event_id: int,
+        *,
+        accepted: bool,
+        by: str = "system",
+        note: str = "",
+    ) -> bool:
+        """写申诉结果：appeal_state + appeal_by + appeal_at + appeal_note；不覆盖 appeal_text。"""
+        conn = self._conn
+        if conn is None or not event_id:
+            return False
+        state = "accepted" if accepted else "rejected"
+        async with self._lock:
+            try:
+                await asyncio.to_thread(
+                    conn.execute,
+                    "UPDATE mod_events SET appeal_state = ?, appeal_by = ?, appeal_at = ?, "
+                    "appeal_note = ? WHERE id = ?",
+                    (
+                        state,
+                        str(by or "system"),
+                        float(now_ts()),
+                        truncate(note, 200),
+                        int(event_id),
+                    ),
+                )
+                await asyncio.to_thread(conn.commit)
+                return True
+            except Exception as exc:  # pragma: no cover
+                if self.logger is not None:
+                    self.logger.error("写入申诉结果失败：%s", exc)
+                return False
+
+    async def list_appeals(
+        self,
+        *,
+        state: str = "pending",
+        group_id: str = "",
+        days: int = 30,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """列出申诉记录（state 传空或 all 表示不筛选状态）。"""
+        sql = "SELECT * FROM mod_events WHERE appealed = 1"
+        params: list[Any] = []
+        if state and state != "all":
+            sql += " AND appeal_state = ?"
+            params.append(str(state))
+        if group_id:
+            sql += " AND group_id = ?"
+            params.append(str(group_id))
+        try:
+            window = int(days)
+        except (TypeError, ValueError):
+            window = 30
+        if window > 0:
+            sql += " AND ts_unix >= ?"
+            params.append(now_ts() - window * 86400)
+        sql += " ORDER BY ts_unix DESC LIMIT ?"
+        params.append(max(1, min(500, int(limit))))
+        return await self._fetch_all(sql, tuple(params))
+
+    # -- 误判自学习白名单 ----------------------------------------------
+    async def whitelist_contains(self, digest: str) -> bool:
+        """该摘要是否在申诉白名单里（命中则跳过 LLM 送审，但仍写审计）。"""
+        if not digest:
+            return False
+        rows = await self._fetch_all(
+            "SELECT digest FROM appeal_whitelist WHERE digest = ? LIMIT 1", (str(digest),)
+        )
+        return bool(rows)
+
+    async def whitelist_add(self, digest: str, skeleton: str, reason: str, by: str) -> None:
+        """写入/更新申诉白名单条目。"""
+        conn = self._conn
+        if conn is None or not digest:
+            return
+        async with self._lock:
+            try:
+                await asyncio.to_thread(
+                    conn.execute,
+                    "INSERT INTO appeal_whitelist(digest, skeleton, reason, added_by, added_at) "
+                    "VALUES(?, ?, ?, ?, ?) ON CONFLICT(digest) DO UPDATE SET "
+                    "skeleton=excluded.skeleton, reason=excluded.reason, "
+                    "added_by=excluded.added_by, added_at=excluded.added_at",
+                    (
+                        str(digest),
+                        truncate(skeleton, 200),
+                        truncate(reason, 200),
+                        str(by or "system"),
+                        float(now_ts()),
+                    ),
+                )
+                await asyncio.to_thread(conn.commit)
+            except Exception as exc:  # pragma: no cover
+                if self.logger is not None:
+                    self.logger.error("写入申诉白名单失败：%s", exc)
+
+    async def whitelist_remove(self, digest: str) -> bool:
+        """撤销白名单条目，返回是否真的删掉了一行。"""
+        conn = self._conn
+        if conn is None or not digest:
+            return False
+        async with self._lock:
+            try:
+                cursor = await asyncio.to_thread(
+                    conn.execute,
+                    "DELETE FROM appeal_whitelist WHERE digest = ?",
+                    (str(digest),),
+                )
+                await asyncio.to_thread(conn.commit)
+                return bool(cursor.rowcount)
+            except Exception as exc:  # pragma: no cover
+                if self.logger is not None:
+                    self.logger.error("撤销申诉白名单失败：%s", exc)
+                return False
+
+    async def whitelist_list(self, limit: int = 200) -> list[dict[str, Any]]:
+        """列出申诉白名单条目（管理台展示与撤销）。"""
+        return await self._fetch_all(
+            "SELECT * FROM appeal_whitelist ORDER BY added_at DESC LIMIT ?",
+            (max(1, min(1000, int(limit))),),
+        )
+
+    # -- 周报聚合（B2 使用） -------------------------------------------
+    @staticmethod
+    def _summary_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "total": int(row.get("total") or 0),
+            "violation": int(row.get("violation") or 0),
+            "review": int(row.get("review") or 0),
+            "allow": int(row.get("allow_count") or 0),
+            "appeals": int(row.get("appeals") or 0),
+            "accepted": int(row.get("accepted") or 0),
+        }
+
+    async def summary_by_category(self, days: int = 7) -> list[dict[str, Any]]:
+        """近 N 天按分类聚合（审核量/违规量/申诉量与通过量）。"""
+        since = now_ts() - max(1, int(days)) * 86400
+        rows = await self._fetch_all(
+            "SELECT COALESCE(category, '') AS category, COUNT(*) AS total, "
+            "SUM(CASE WHEN verdict = 'violation' THEN 1 ELSE 0 END) AS violation, "
+            "SUM(CASE WHEN verdict = 'review' THEN 1 ELSE 0 END) AS review, "
+            "SUM(CASE WHEN verdict = 'allow' THEN 1 ELSE 0 END) AS allow_count, "
+            "SUM(CASE WHEN appealed = 1 THEN 1 ELSE 0 END) AS appeals, "
+            "SUM(CASE WHEN appeal_state = 'accepted' THEN 1 ELSE 0 END) AS accepted "
+            "FROM mod_events WHERE ts_unix >= ? GROUP BY category ORDER BY total DESC",
+            (since,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._summary_row(row)
+            item["category"] = str(row.get("category") or "")
+            result.append(item)
+        return result
+
+    async def summary_by_group(self, days: int = 7) -> list[dict[str, Any]]:
+        """近 N 天按群聚合（审核量/违规量/申诉量与通过量）。"""
+        since = now_ts() - max(1, int(days)) * 86400
+        rows = await self._fetch_all(
+            "SELECT group_id, COALESCE(group_name, '') AS group_name, COUNT(*) AS total, "
+            "SUM(CASE WHEN verdict = 'violation' THEN 1 ELSE 0 END) AS violation, "
+            "SUM(CASE WHEN verdict = 'review' THEN 1 ELSE 0 END) AS review, "
+            "SUM(CASE WHEN verdict = 'allow' THEN 1 ELSE 0 END) AS allow_count, "
+            "SUM(CASE WHEN appealed = 1 THEN 1 ELSE 0 END) AS appeals, "
+            "SUM(CASE WHEN appeal_state = 'accepted' THEN 1 ELSE 0 END) AS accepted "
+            "FROM mod_events WHERE ts_unix >= ? "
+            "GROUP BY group_id, group_name ORDER BY total DESC",
+            (since,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._summary_row(row)
+            item["group_id"] = str(row.get("group_id") or "")
+            item["group_name"] = str(row.get("group_name") or "")
+            result.append(item)
+        return result
 
     def record_event(self, **payload: Any) -> bool:
         payload.setdefault("ts_unix", now_ts())

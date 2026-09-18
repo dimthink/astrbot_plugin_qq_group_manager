@@ -38,6 +38,8 @@ RECALL_COMMANDS = ("撤回",)
 LOG_COMMANDS = ("审核日志",)
 STATS_COMMANDS = ("审核统计",)
 APPEAL_COMMANDS = ("申诉",)
+GLOBAL_BLACKLIST_COMMANDS = ("全局拉黑", "全局解除")
+APPEAL_DECIDE_COMMANDS = ("申诉通过", "申诉驳回")
 JOIN_MODE_COMMANDS = ("入群审核",)
 JOIN_LIST_COMMANDS = ("入群申请",)
 JOIN_APPROVE_COMMANDS = ("入群通过",)
@@ -57,6 +59,7 @@ GROUP_ADMIN_COMMANDS: tuple[str, ...] = (
     *RECALL_COMMANDS,
     *LOG_COMMANDS,
     *STATS_COMMANDS,
+    *APPEAL_DECIDE_COMMANDS,
     *JOIN_MODE_COMMANDS,
     *JOIN_LIST_COMMANDS,
     *JOIN_APPROVE_COMMANDS,
@@ -66,7 +69,11 @@ GROUP_ADMIN_COMMANDS: tuple[str, ...] = (
 )
 
 #: 仅 AstrBot 管理员可用
-ADMIN_ONLY_COMMANDS: tuple[str, ...] = (*SELFCHECK_COMMANDS, *CONFIG_COMMANDS)
+ADMIN_ONLY_COMMANDS: tuple[str, ...] = (
+    *SELFCHECK_COMMANDS,
+    *CONFIG_COMMANDS,
+    *GLOBAL_BLACKLIST_COMMANDS,
+)
 
 #: 所有人可用
 PUBLIC_COMMANDS: tuple[str, ...] = (
@@ -145,6 +152,7 @@ def menu_text() -> str:
         "• 关键词 添加/删除/列表 · 信任 @某人 · 取消信任 @某人\n"
         "• 禁言 @某人 [时长] · 解禁 @某人 · 撤回（引用消息）\n"
         "• 审核日志 [条数] · 审核统计 [今日/7天]\n"
+        "• 申诉通过 / 申诉驳回 [理由] ─ 回复申诉消息处理\n"
         "• 入群审核 开启/关闭/模式 <模式> · 入群申请\n"
         "• 入群通过 <序号> · 入群拒绝 <序号> [理由]\n"
         "• 黑名单 添加/移除/列表\n"

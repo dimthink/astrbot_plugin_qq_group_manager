@@ -122,9 +122,35 @@ class WebApi:
             (f"/{PLUGIN_NAME}/members/remove", self.members_remove, ["POST"], "批量移除成员"),
             (f"/{PLUGIN_NAME}/blacklist", self.blacklist_get, ["GET"], "黑名单查询"),
             (f"/{PLUGIN_NAME}/blacklist", self.blacklist_set, ["POST"], "黑名单增删"),
+            (
+                f"/{PLUGIN_NAME}/global_blacklist",
+                self.global_blacklist_get,
+                ["GET"],
+                "跨群黑名单列表",
+            ),
+            (
+                f"/{PLUGIN_NAME}/global_blacklist/update",
+                self.global_blacklist_update,
+                ["POST"],
+                "跨群黑名单增删",
+            ),
             (f"/{PLUGIN_NAME}/joins", self.joins_get, ["GET"], "入群申请列表"),
             (f"/{PLUGIN_NAME}/joins/fetch", self.joins_fetch, ["POST"], "立即拉取入群申请"),
             (f"/{PLUGIN_NAME}/joins/decide", self.joins_decide, ["POST"], "人工审批入群申请"),
+            (f"/{PLUGIN_NAME}/appeals", self.appeals_get, ["GET"], "申诉列表"),
+            (f"/{PLUGIN_NAME}/appeals/decide", self.appeals_decide, ["POST"], "处理申诉"),
+            (
+                f"/{PLUGIN_NAME}/appeal_whitelist",
+                self.appeal_whitelist_get,
+                ["GET"],
+                "申诉白名单列表",
+            ),
+            (
+                f"/{PLUGIN_NAME}/appeal_whitelist",
+                self.appeal_whitelist_post,
+                ["POST"],
+                "申诉白名单增删",
+            ),
             (f"/{PLUGIN_NAME}/policy", self.policy_get, ["GET"], "官方入群审核策略"),
             (f"/{PLUGIN_NAME}/policy", self.policy_post, ["POST"], "策略维护"),
         ]
@@ -672,6 +698,34 @@ class WebApi:
             )
         )
 
+    async def global_blacklist_get(self):
+        """跨群黑名单快照（B5）。"""
+        if not self._service_ready():
+            return error_response("插件尚未就绪")
+        return json_response(self.service.global_blacklist_snapshot())
+
+    async def global_blacklist_update(self):
+        """新增/移除跨群黑名单条目。"""
+        if not self._service_ready():
+            return error_response("插件尚未就绪")
+        payload = await request.json(default={})
+        op = str((payload or {}).get("op") or "add")
+        openid = str((payload or {}).get("openid") or "").strip()
+        reason = str((payload or {}).get("reason") or "")
+        if op not in ("add", "remove"):
+            return error_response("op 只能是 add 或 remove")
+        if not openid:
+            return error_response("缺少 openid")
+        result = await self.service.global_blacklist_update(
+            op=op,
+            openid=openid,
+            reason=reason,
+            by=f"webui:{request.username or 'unknown'}",
+        )
+        if not result.get("ok"):
+            return error_response(str(result.get("error") or "操作失败"), data=result)
+        return json_response(result)
+
     async def joins_get(self):
         """入群申请（待审 + 历史 + 策略冲突）。"""
         if not self._service_ready():
@@ -715,6 +769,74 @@ class WebApi:
         )
         if not result.get("ok"):
             return error_response(str(result.get("message") or "审批失败"), data=result)
+        return json_response(result)
+
+    async def appeals_get(self):
+        """申诉列表（state/group_id/days 筛选）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        state = str(request.query.get("state") or "pending").strip()
+        group_id = str(request.query.get("group_id") or "").strip()
+        days = self._int_arg("days", 30, 1, 365)
+        limit = self._int_arg("limit", 100, 1, 500)
+        return json_response(
+            await self.service.appeals_snapshot(
+                state=state or "pending",
+                group_id=group_id,
+                days=days,
+                limit=limit,
+            )
+        )
+
+    async def appeals_decide(self):
+        """处理申诉（op=accept|reject），通过时执行解禁补偿。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        try:
+            event_id = int((payload or {}).get("event_id") or 0)
+        except (TypeError, ValueError):
+            event_id = 0
+        if not event_id:
+            return error_response("缺少 event_id")
+        op = str((payload or {}).get("op") or "accept")
+        if op not in ("accept", "reject"):
+            return error_response("op 只能是 accept 或 reject")
+        result = await self.service.appeal_decide(
+            event_id,
+            accepted=op == "accept",
+            note=str((payload or {}).get("note") or ""),
+            by=f"webui:{request.username or 'unknown'}",
+        )
+        if not result.get("ok"):
+            return error_response(str(result.get("message") or "处理失败"), data=result)
+        return json_response(result)
+
+    async def appeal_whitelist_get(self):
+        """误判自学习白名单列表。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        return json_response(await self.service.appeal_whitelist_snapshot())
+
+    async def appeal_whitelist_post(self):
+        """白名单增删（op=add|del）。"""
+        if not self._service_ready():
+            return error_response("插件尚未初始化完成，请稍后重试")
+        payload = await request.json(default={})
+        op = str((payload or {}).get("op") or "del")
+        digest = str((payload or {}).get("digest") or "")
+        if op not in ("add", "del"):
+            return error_response("op 只能是 add 或 del")
+        if not digest:
+            return error_response("缺少 digest")
+        result = await self.service.appeal_whitelist_update(
+            op=op,
+            digest=digest,
+            by=f"webui:{request.username or 'unknown'}",
+            reason=str((payload or {}).get("reason") or ""),
+        )
+        if not result.get("ok"):
+            return error_response(str(result.get("message") or "操作失败"), data=result)
         return json_response(result)
 
     async def policy_get(self):

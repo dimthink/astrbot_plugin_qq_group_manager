@@ -261,6 +261,8 @@ class Verdict:
     raw: str = ""
     parse_error: bool = False
     latency_ms: int = 0
+    #: 图片中二维码承载的文本（由多模态模型填写；解析不到即忽略）
+    qr_text: str = ""
 
     @property
     def is_violation(self) -> bool:
@@ -287,6 +289,7 @@ class Verdict:
             raw=self.raw,
             parse_error=self.parse_error,
             latency_ms=self.latency_ms,
+            qr_text=self.qr_text[:300],
         )
 
 
@@ -310,6 +313,22 @@ def default_settings() -> dict[str, Any]:
         "auto_enforce_normalized": False,
         "duplicate_flood_window": 300,
         "duplicate_flood_members": 3,
+        # 竞赛域名白名单：白名单内链接不计 link 分（只降权，不豁免规则与送审）
+        "domain_allowlist_enabled": True,
+        "domain_allowlist": [
+            "ac.nowcoder.com",
+            "nowcoder.com",
+            "codeforces.com",
+            "atcoder.jp",
+            "luogu.com.cn",
+            "luogu.com",
+            "xcpc.link",
+            "xcpc.ink",
+            "vjudge.net",
+            "codechef.com",
+            "icpc.global",
+            "hdu.edu.cn",
+        ],
         "llm_min_confidence": 0.7,
         "llm_timeout": 20,
         "llm_qpm_per_group": 20,
@@ -344,6 +363,10 @@ def default_settings() -> dict[str, Any]:
         "join_decline_blacklist": True,
         "join_trust_inviter": False,
         "notify_session": "",
+        # 申诉闭环：默认接受申诉；误判自学习白名单默认关（避免被社工利用）
+        "appeal_enabled": True,
+        "appeal_auto_whitelist": False,
+        "appeal_notify": True,
         "db_path": "",
         "retention_events_days": 30,
         "retention_api_days": 7,

@@ -31,6 +31,8 @@ KEY_TRUSTED = "trusted"
 KEY_ROLE_CACHE = "role_cache"
 KEY_MEMBER_CACHE = "member_cache"
 KEY_LOCAL_BLACKLIST = "local_blacklist"
+#: 跨群黑名单：{openid: {"reason","added_by","added_at"}}，对全插件生效
+KEY_GLOBAL_BLACKLIST = "global_blacklist"
 KEY_UI_STATE = "ui_state"
 KEY_JOIN_CURSOR = "join_cursor"
 KEY_TEMPLATES = "templates"
@@ -91,6 +93,10 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         "join_decline_blacklist",
         "join_trust_inviter",
         "store_text",
+        "domain_allowlist_enabled",
+        "appeal_enabled",
+        "appeal_auto_whitelist",
+        "appeal_notify",
         "normalize_enabled",
         "homoglyph_enabled",
         "template_enabled",
@@ -113,6 +119,12 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         if str(item) in SEND_CONDITIONS or str(item).startswith(RISK_CONDITION_PREFIX)
     ]
     settings["send_conditions"] = conditions or ["rule_hit"]
+    domains = settings.get("domain_allowlist")
+    if not isinstance(domains, list):
+        domains = defaults.get("domain_allowlist") or []
+    settings["domain_allowlist"] = [
+        str(item).strip() for item in domains if str(item).strip()
+    ]
     if not isinstance(settings.get("mute_steps"), dict):
         settings["mute_steps"] = {"3": 600, "4": 3600, "5": 86400}
     if not isinstance(settings.get("action_matrix"), dict):
@@ -143,6 +155,7 @@ class PluginStore:
         self._homoglyph: dict[str, str] = {}
         self._trusted: dict[str, list[str]] = {}
         self._local_blacklist: dict[str, list[str]] = {}
+        self._global_blacklist: dict[str, dict[str, Any]] = {}
         self._role_cache: dict[str, dict[str, dict[str, Any]]] = {}
         self._member_cache: dict[str, dict[str, dict[str, Any]]] = {}
         self._ui_state: dict[str, Any] = {}
@@ -174,6 +187,7 @@ class PluginStore:
         for key, target in (
             (KEY_TRUSTED, self._trusted),
             (KEY_LOCAL_BLACKLIST, self._local_blacklist),
+            (KEY_GLOBAL_BLACKLIST, self._global_blacklist),
             (KEY_ROLE_CACHE, self._role_cache),
             (KEY_MEMBER_CACHE, self._member_cache),
         ):
@@ -226,6 +240,8 @@ class PluginStore:
                     await self._kv.put(KEY_TRUSTED, self._trusted)
                 elif key == KEY_LOCAL_BLACKLIST:
                     await self._kv.put(KEY_LOCAL_BLACKLIST, self._local_blacklist)
+                elif key == KEY_GLOBAL_BLACKLIST:
+                    await self._kv.put(KEY_GLOBAL_BLACKLIST, self._global_blacklist)
                 elif key == KEY_ROLE_CACHE:
                     await self._kv.put(KEY_ROLE_CACHE, self._role_cache)
                 elif key == KEY_MEMBER_CACHE:
@@ -386,6 +402,44 @@ class PluginStore:
         self._dirty.add(KEY_TRUSTED)
         await self.flush()
         return cleaned
+
+    # ------------------------------------------------------------------
+    # 跨群黑名单（B5）：与群级黑名单分开存，默认只拒绝入群，不自动移出成员
+    # ------------------------------------------------------------------
+    def global_blacklist(self) -> dict[str, dict[str, Any]]:
+        """返回 {openid: {"reason","added_by","added_at"}}。"""
+        return {str(key): dict(value) for key, value in self._global_blacklist.items()}
+
+    def is_globally_blacklisted(self, openid: str) -> bool:
+        return str(openid or "").strip() in self._global_blacklist
+
+    def global_blacklist_reason(self, openid: str) -> str:
+        entry = self._global_blacklist.get(str(openid or "").strip()) or {}
+        return str(entry.get("reason") or "")
+
+    async def add_global_blacklist(
+        self, openid: str, *, reason: str = "", added_by: str = ""
+    ) -> dict[str, dict[str, Any]]:
+        key = str(openid or "").strip()
+        if not key:
+            return self.global_blacklist()
+        self._global_blacklist[key] = {
+            "reason": str(reason or "")[:200],
+            "added_by": str(added_by or ""),
+            "added_at": now_ts(),
+        }
+        self._dirty.add(KEY_GLOBAL_BLACKLIST)
+        await self.flush()
+        return self.global_blacklist()
+
+    async def remove_global_blacklist(self, openid: str) -> bool:
+        key = str(openid or "").strip()
+        if key not in self._global_blacklist:
+            return False
+        self._global_blacklist.pop(key, None)
+        self._dirty.add(KEY_GLOBAL_BLACKLIST)
+        await self.flush()
+        return True
 
     def local_blacklist(self, group_id: str) -> list[str]:
         return list(self._local_blacklist.get(group_id, []))

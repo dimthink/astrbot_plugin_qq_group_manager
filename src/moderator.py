@@ -213,6 +213,7 @@ def parse_verdict(raw_text: str, *, source: str = "llm", latency_ms: int = 0) ->
         source=source,
         raw=truncate(raw_text, 500),
         latency_ms=latency_ms,
+        qr_text=truncate(payload.get("qr_text") or "", 300),
     )
     return verdict.clamped()
 
@@ -419,6 +420,8 @@ class LLMModerator:
             system_prompt += (
                 "\n- 本条消息附带图片：请结合图片内容判断，图片中的文字、二维码、联系方式、"
                 "广告版式与违规画面同样属于审核范围"
+                "\n- 若图片中含二维码，请尽力识别其承载的文本（通常是链接、群号或口令），"
+                "原样填入 JSON 的 qr_text 字段；识别不出就填空字符串，不要编造"
             )
 
         started = self._clock()

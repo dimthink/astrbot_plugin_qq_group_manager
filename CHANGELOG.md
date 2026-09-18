@@ -7,6 +7,56 @@
 
 ---
 
+## [0.9.0] - 2026-09-18
+
+> ⚖️ 补上审核插件最大的痛点：**申诉闭环**（Reply 精确关联 → 人工复核 → 自动解禁 + 留痕）与
+> **竞赛域名白名单**（只降权、不豁免），并顺手统一了长期不一致的版本号。
+
+### ✨ 新增
+- **申诉闭环（B1）**：
+  - 成员**回复被处置的消息**发送 `申诉 <理由>`，插件按 Reply 关联到原审核事件；
+    取不到引用时回退"最近一条被处置记录"，并在日志里打印回退原因（QQ 引用结构随适配器版本变化）。
+  - 新增群管指令 `申诉通过 / 申诉驳回 [理由]`（回复申诉消息使用），与管理台「申诉」视图等价。
+  - 管理台新增 `GET /{PLUGIN_NAME}/appeals`（state/group_id/days 筛选）与
+    `POST /{PLUGIN_NAME}/appeals/decide`（event_id/op=accept|reject/note），以及前端「申诉」视图
+    （时间/群/申诉人/理由/原判/状态 + 通过/驳回 + 查看原文）。
+  - 申诉通过时：若原事件产生过禁言则调用 `unmute_member`（op=del）解禁并同步 `mutes` 台账；
+    追加 `mod_actions(action="appeal_accepted", event_id=...)` 留痕；**不删除、不改写原审核事件**；
+    回执申诉人并通知管理员会话。日志页新增 `appealed` 筛选与 `appeal_state` 列。
+- **误判自学习白名单（默认关）**：`appeal_auto_whitelist=true` 时，申诉通过会把原消息摘要写入
+  `appeal_whitelist`；后续同内容消息**跳过 LLM 送审**但仍写审计（`verdict=allow / category=whitelisted`），
+  规则分与处置矩阵不变。管理台「规则增强」页展示白名单条目与撤销入口，并展示"被申诉通过最多"的规则建议。
+- **竞赛域名白名单（B3）**：新增 `src/links.py`（`normalize_domain` / `extract_domains` /
+  `allowlisted_domains`）。白名单内链接**不计 link 分、不置 has_link**，但**仍走完整规则、审计与 LLM 送审判断**
+  （只降权，不豁免）；按点边界后缀匹配（`m1.codeforces.com` 命中 `codeforces.com`，`fake-codeforces.com` 不命中）。
+  命中时在 `rule_hits` 追加 `{"rule": "link_allowlist", "domains": [...]}` 便于统计。
+- **新配置项**：`domain_allowlist_enabled`（true）、`domain_allowlist`（内置竞赛域名）、
+  `appeal_enabled`（true）、`appeal_auto_whitelist`（false）、`appeal_notify`（true）。
+- **周报聚合基础**：`AuditStore.summary_by_category(days)` / `summary_by_group(days)`（B2 周报将使用）。
+
+### ⚙️ 变更
+- `main.py` 的 `VERSION` 与 `metadata.yaml` 统一为 `0.9.0`（此前分别为 0.5.0 / 0.8.0）。
+- `申诉` 指令不再丢弃 event 对象（原实现的 `del event` 是 Reply 关联失效的根因）。
+
+### ⚠️ 升级注意
+- **老库会自动补列**：启动时 `AuditStore._ensure_columns()` 用 `PRAGMA table_info` + `ALTER TABLE ADD COLUMN`
+  幂等补 `mod_events.appeal_by / appeal_at / appeal_note`，并新建 `appeal_whitelist` 表；
+  迁移失败只记 warning、不阻塞启动。升级前建议先备份 `moderation.db`。
+- 白名单只降权/只跳过送审，**不会豁免规则命中与处置矩阵**；误判白名单默认关闭。
+
+### ✅ 验证
+- 新增 `tests/test_appeal.py`（14 例）、`tests/test_rules.py` 追加 6 例、
+  `tests/test_ui_contract.py` 追加 3 例；全量 **224 passed**。
+
+
+### ✨ 新增（B4 二维码内容识别 / B5 跨群黑名单）
+- **二维码内容识别（复用多模态，零新依赖）**：图片送审时要求模型把二维码承载文本填入
+  `qr_text`；命中群号/短链/链接等引流特征时**升级严重度并在审计 rule_hits 留痕**
+  （不覆盖模型自身的 verdict 判定，避免把"识别失败"当成违规）。
+- **跨群黑名单**：新增 `全局拉黑 @某人 <理由>` / `全局解除 @某人` / `全局拉黑`（列表，仅 AstrBot 管理员）
+  与管理台「成员与禁言 → 跨群黑名单」区块；命中后**任意群的入群申请都会被自动拒绝**，
+  默认不自动移出已在群成员；判定链优先级：本地黑名单 → **跨群黑名单** → 机器人账号 → 平台风险提示 → 信任邀请人 → LLM。
+
 ## [0.8.0] - 2026-09-16
 
 > ✨ 补齐"繁体 + 异体字 + 全角 + 空格插字"这类重度混淆：实测保健药广告与非法荐股广告

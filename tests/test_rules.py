@@ -100,3 +100,94 @@ def test_reload_replaces_rules():
     engine.reload({"hard": [{"pattern": "新", "scope": "all"}]})
     assert engine.evaluate("旧", group_id="g1").hits == []
     assert len(engine.evaluate("新", group_id="g1").hits) == 1
+
+
+# --------------------------------------------------------------------------
+# B3 竞赛域名白名单（只降权，不豁免）
+# --------------------------------------------------------------------------
+from src.links import allowlisted_domains, extract_domains  # noqa: E402
+
+COMPETITION = "codeforces.com/contest/1"
+ALLOWLIST = ["ac.nowcoder.com", "nowcoder.com", "codeforces.com", "atcoder.jp", "luogu.com.cn"]
+
+
+def test_domain_allowlist_pure_competition_link_is_discounted():
+    engine = make_engine()
+    evaluation = engine.evaluate(
+        "题解看 https://codeforces.com/contest/1", group_id="g1", allowlisted=True
+    )
+    assert evaluation.has_link is False
+    assert evaluation.signals.get("link_allowlisted") is True
+    assert "link" not in evaluation.signals
+    assert evaluation.score == 0
+
+
+def test_domain_allowlist_mixed_short_link_still_counts():
+    text = "题解看 codeforces.com/contest/1 或 t.cn/abcdef"
+    all_allowed, hits = allowlisted_domains(text, ALLOWLIST)
+    assert all_allowed is False
+    assert hits == {"codeforces.com"}
+    engine = make_engine()
+    evaluation = engine.evaluate(text, group_id="g1", allowlisted=all_allowed)
+    assert evaluation.has_link is True
+    assert evaluation.signals.get("link") == 25
+    assert "link_allowlisted" not in evaluation.signals
+
+
+def test_domain_allowlist_recognizes_bare_port_upper_and_cn_punctuation():
+    text = "裸域名 codeforces.com/contest/1、带端口 CODEforces.com:8080、大写 ATCODER.JP、"
+    text += "中文标点『luogu.com.cn』以及 nowcoder 点 com"
+    domains = extract_domains(text)
+    assert "codeforces.com" in domains
+    assert "atcoder.jp" in domains
+    assert "luogu.com.cn" in domains
+    assert "nowcoder.com" in domains
+    all_allowed, hits = allowlisted_domains(text, ALLOWLIST)
+    assert all_allowed is True
+    assert hits == domains
+
+
+def test_domain_allowlist_subdomain_matches_but_lookalike_does_not():
+    matched, hits = allowlisted_domains("m1.codeforces.com/contest/1", ["codeforces.com"])
+    assert matched is True
+    assert hits == {"m1.codeforces.com"}
+    assert allowlisted_domains("fake-codeforces.com", ["codeforces.com"]) == (False, set())
+    assert allowlisted_domains("codeforces.com.evil.com", ["codeforces.com"]) == (False, set())
+
+
+def test_domain_allowlist_disabled_or_empty_matches_current_behaviour():
+    engine = make_engine()
+    baseline = engine.evaluate(COMPETITION, group_id="g1")
+    explicit_off = engine.evaluate(COMPETITION, group_id="g1", allowlisted=False)
+    assert baseline.score == explicit_off.score
+    assert baseline.signals == explicit_off.signals
+    assert baseline.has_link is True
+    assert allowlisted_domains(COMPETITION, []) == (False, set())
+    assert allowlisted_domains("没有链接的普通聊天", ALLOWLIST) == (False, set())
+
+
+def test_domain_allowlist_keeps_rules_and_audit_trail():
+    engine = make_engine(
+        {
+            "hard": [
+                {
+                    "id": "h1",
+                    "type": "literal",
+                    "pattern": "加群",
+                    "action": ["mute"],
+                    "scope": "all",
+                    "enabled": True,
+                    "note": "广告引流",
+                }
+            ]
+        }
+    )
+    text = "加群 codeforces.com/contest/1"
+    plain = engine.evaluate(text, group_id="g1")
+    discounted = engine.evaluate(text, group_id="g1", allowlisted=True)
+    assert plain.has_link is True and plain.signals.get("link") == 25
+    assert discounted.has_link is False
+    assert discounted.signals.get("link_allowlisted") is True
+    # 规则仍然命中、动作仍然可执行：白名单不是后门
+    assert [hit.rule_id for hit in discounted.hard_hits] == ["h1"]
+    assert discounted.enforce_actions == ["mute"]

@@ -60,3 +60,56 @@ def test_send_conditions_roundtrip_keeps_all_ui_options():
     ]
     normalized = normalize_settings({"send_conditions": ui_options})["send_conditions"]
     assert normalized == ui_options
+
+
+def test_domain_allowlist_settings_contract():
+    from src.store import normalize_settings
+
+    defaults = default_settings()
+    assert defaults["domain_allowlist_enabled"] is True
+    assert "codeforces.com" in defaults["domain_allowlist"]
+
+    normalized = normalize_settings({"domain_allowlist_enabled": 0, "domain_allowlist": []})
+    assert normalized["domain_allowlist_enabled"] is False
+    assert normalized["domain_allowlist"] == []
+
+    fallback = normalize_settings({"domain_allowlist": "codeforces.com"})
+    assert isinstance(fallback["domain_allowlist"], list)
+    assert "codeforces.com" in fallback["domain_allowlist"]
+
+    cleaned = normalize_settings({"domain_allowlist": [" codeforces.com ", "", "atcoder.jp"]})
+    assert cleaned["domain_allowlist"] == ["codeforces.com", "atcoder.jp"]
+
+
+def test_policy_payload_includes_appeal_and_domain_keys():
+    text = app_js()
+    start = text.index("async function viewPolicy")
+    block = re.search(r"const payload = \{(.*?)\n    \};", text[start:], re.S)
+    assert block, "未找到策略页 payload 定义"
+    keys = set(re.findall(r"^\s{6}([a-z_]+):", block.group(1), re.M))
+    for key in (
+        "domain_allowlist_enabled",
+        "domain_allowlist",
+        "appeal_enabled",
+        "appeal_auto_whitelist",
+        "appeal_notify",
+    ):
+        assert key in keys, f"策略页缺少 payload 键：{key}"
+
+
+def test_appeals_view_contract():
+    text = app_js()
+    views = re.search(r"const VIEWS = \[(.*?)\];", text, re.S)
+    assert views, "未找到 VIEWS 定义"
+    assert "id: 'appeals'" in views.group(1), "VIEWS 缺少申诉视图"
+    assert "bridge.apiGet('appeals'" in text
+    assert "bridge.apiPost('appeals/decide'" in text
+    assert "bridge.apiPost('appeal_whitelist'" in text
+    assert "'appeal_state'" in text, "日志页缺少 appeal_state 列"
+
+    defaults = default_settings()
+    for key in ("appeal_enabled", "appeal_auto_whitelist", "appeal_notify"):
+        assert key in defaults, f"default_settings 缺少 {key}"
+    assert defaults["appeal_enabled"] is True
+    assert defaults["appeal_auto_whitelist"] is False
+    assert defaults["appeal_notify"] is True

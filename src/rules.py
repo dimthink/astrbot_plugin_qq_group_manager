@@ -787,6 +787,7 @@ SCORE_RULES: dict[str, int] = {
 
 SIGNAL_LABELS = {
     "link": "包含外链或短链",
+    "link_allowlisted": "链接命中域名白名单（已降权，仍走送审）",
     "contact": "疑似联系方式",
     "digit_run": "含长数字串且伴随引流词",
     "invite_bait": "含拉群动作词与诱饵词",
@@ -843,7 +844,7 @@ class RuleEvaluation:
     """一次规则评估的结果。"""
 
     hits: list[RuleHit] = field(default_factory=list)
-    signals: dict[str, int] = field(default_factory=dict)
+    signals: dict[str, Any] = field(default_factory=dict)
     score: int = 0
     views: dict[str, str] = field(default_factory=dict)
     has_link: bool = False
@@ -1169,8 +1170,13 @@ class RuleEngine:
         recent_messages: int = 0,
         duplicate_senders: int = 0,
         duplicate_members: int = 3,
+        allowlisted: bool = False,
     ) -> RuleEvaluation:
-        """求值：多视图规则匹配 + 模板匹配 + 内置检测 + 风险分。"""
+        """求值：多视图规则匹配 + 模板匹配 + 内置检测 + 风险分。
+
+        allowlisted=True 表示文本中的链接全部命中域名白名单：此时不计 link 分、
+        不置 has_link，但仍走完整规则、审计与送审判断（**只降权，不豁免**）。
+        """
         views = normalize(text or "", homoglyph=self._homoglyph, with_pinyin=self.pinyin_enabled)
         result = RuleEvaluation(
             views={
@@ -1224,9 +1230,14 @@ class RuleEngine:
 
         # 渠道存在性提前计算：供模板的 require_channel 判断（链接/联系方式/渠道词）
         channel_view = _CHANNEL_STRIP_RE.sub("", views.raw or "")
-        link_present = bool(
+        link_detected = bool(
             LINK_RE.search(views.raw or "") or LINK_RE.search(channel_view)
         )
+        link_present = link_detected
+        if link_present and allowlisted:
+            # 白名单内链接：不计 link 分、不置 has_link，但下游渠道语义保持不变。
+            link_present = False
+            result.signals["link_allowlisted"] = True
         contact_present = bool(
             CONTACT_RE.search(views.raw or "")
             or CONTACT_RE.search(views.compact)
@@ -1298,7 +1309,7 @@ class RuleEngine:
         marker_hits = [word for word in SPAM_MARKERS if word in skeleton or word in compact]
         # 真实渠道判定：链接/联系方式，或文本中出现渠道词（群号、加v、二维码…）。
         # 无渠道时"动词+诱饵"不足以判定引流，避免玩笑/短信梗被误判。
-        has_channel = bool(result.has_link or result.has_contact) or any(
+        has_channel = bool(link_detected or result.has_contact) or any(
             word in skeleton or word in compact for word in CHANNEL_MARKERS
         )
         result.has_channel = has_channel
@@ -1344,7 +1355,12 @@ class RuleEngine:
             result.long_text = True
             result.signals["long_text"] = SCORE_RULES["long_text"]
 
-        score += sum(result.signals.values())
+        # 只累加数值型信号：link_allowlisted 等布尔留痕不参与打分。
+        score += sum(
+            value
+            for value in result.signals.values()
+            if isinstance(value, int) and not isinstance(value, bool)
+        )
 
         # 玩梗 / 讨论 / 引用语境识别：
         # - 模仿银行短信、经典梗（v我50）、AI 越狱文案 → 不是违规实施；
@@ -1360,7 +1376,7 @@ class RuleEngine:
         recruit_like = (
             len(recruit_markers) >= RECRUIT_MIN_MARKERS
             and len(raw_text) >= RECRUIT_MIN_LENGTH
-            and not result.has_link
+            and not link_detected
             and not any(word in skeleton or word in compact for word in RECRUIT_REJECT)
         )
         if recruit_like and result.duplicate_content:

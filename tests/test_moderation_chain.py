@@ -588,3 +588,43 @@ def test_with_text_mode_skips_pure_image(tmp_path):
         await chain.close()
 
     asyncio.run(scenario())
+
+
+def test_chain_escalates_qr_content_from_image(tmp_path):
+    """图片二维码内容命中引流特征时：升级严重度并在审计里留痕。"""
+
+    async def scenario():
+        chain = await run_chain(
+            tmp_path,
+            llm_response=(
+                '{"verdict":"review","category":"广告引流","severity":2,'
+                '"confidence":0.9,"reason":"疑似引流","suggested_action":"warn",'
+                '"qr_text":"加群 987654321"}'
+            ),
+        )
+        events = await chain.events()
+        row = events["items"][0]
+        assert row["severity"] >= 3, "二维码命中引流特征应升级严重度"
+        assert "二维码" in (row["reason"] or "")
+        assert "qr_content" in (row["rule_hits"] or "")
+        await chain.close()
+
+    asyncio.run(scenario())
+
+
+def test_chain_without_qr_text_keeps_original_severity(tmp_path):
+    async def scenario():
+        chain = await run_chain(
+            tmp_path,
+            llm_response=(
+                '{"verdict":"review","category":"广告引流","severity":2,'
+                '"confidence":0.9,"reason":"疑似引流","suggested_action":"warn"}'
+            ),
+        )
+        events = await chain.events()
+        row = events["items"][0]
+        assert row["severity"] == 2
+        assert "qr_content" not in (row["rule_hits"] or "")
+        await chain.close()
+
+    asyncio.run(scenario())

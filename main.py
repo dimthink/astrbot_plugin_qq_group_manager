@@ -29,6 +29,7 @@ from .src.api_client import BotpyTransport, QQApiError, QQGroupAPI
 from .src.audit import AuditStore
 from .src.commands import (
     APPEAL_COMMANDS,
+    APPEAL_DECIDE_COMMANDS,
     BLACKLIST_COMMANDS,
     CONFIG_COMMANDS,
     DRYRUN_COMMANDS,
@@ -48,6 +49,7 @@ from .src.commands import (
     MODE_LABELS,
     MUTE_COMMANDS,
     RECALL_COMMANDS,
+    GLOBAL_BLACKLIST_COMMANDS,
     SELFCHECK_COMMANDS,
     STATS_COMMANDS,
     STATUS_COMMANDS,
@@ -71,6 +73,7 @@ from .src.commands import (
     suggestions_for,
 )
 from .src.join_review import JoinReviewer
+from .src.links import allowlisted_domains, extract_domains, qr_risk_text
 from .src.models import (
     CAP_BOT_STATE,
     CAP_FULL_MSG,
@@ -93,12 +96,13 @@ from .src.utils import (
     now_ts,
     parse_duration,
     parse_iso,
+    safe_json_dumps,
     to_iso,
 )
 from .src.web_api import EventBus, WebApi
 
 PLUGIN_NAME = "astrbot_plugin_qq_group_manager"
-VERSION = "0.5.0"
+VERSION = "0.9.0"
 
 STATE_FLUSH_INTERVAL = 30.0
 MAINTENANCE_INTERVAL = 3600.0
@@ -665,11 +669,32 @@ class QQGroupManager(Star):
                 "群：{group}\n"
                 "成员：{name}（{openid}）\n"
                 "理由：{text}\n"
+                "原消息：{excerpt}\n"
                 "事件 ID：{event_id}".format(
                     group=payload.get("group_name") or mask_openid(payload.get("group_id")),
                     name=payload.get("sender_name") or "未知",
                     openid=mask_openid(payload.get("sender_openid")),
                     text=payload.get("text") or "",
+                    excerpt=payload.get("excerpt") or "-",
+                    event_id=payload.get("event_id") or "-",
+                )
+            )
+        if kind == "appeal_result":
+            verdict = "通过（已解禁）" if payload.get("accepted") else "驳回"
+            if payload.get("accepted") and not payload.get("unmuted"):
+                verdict = "通过"
+            return (
+                "申诉处理结果\n"
+                "群：{group}\n"
+                "成员：{name}（{openid}）\n"
+                "结果：{verdict}\n"
+                "备注：{text}\n"
+                "事件 ID：{event_id}".format(
+                    group=payload.get("group_name") or mask_openid(payload.get("group_id")),
+                    name=payload.get("sender_name") or "未知",
+                    openid=mask_openid(payload.get("sender_openid")),
+                    verdict=verdict,
+                    text=payload.get("text") or "-",
                     event_id=payload.get("event_id") or "-",
                 )
             )
@@ -932,6 +957,22 @@ class QQGroupManager(Star):
                 sender_openid,
                 window=float(settings.get("duplicate_flood_window", 300) or 300),
             )
+        digest = digest_text(text)
+        # 误判自学习白名单：命中只跳过 LLM 送审，规则分与处置矩阵不变（仍写审计）
+        whitelisted = False
+        if text.strip() and settings.get("appeal_auto_whitelist") and self.audit is not None:
+            try:
+                whitelisted = await self.audit.whitelist_contains(digest)
+            except Exception as exc:  # pragma: no cover - 白名单查询失败不应影响审核
+                self.logger.warning("查询申诉白名单失败：%s", exc)
+        # 竞赛域名白名单：白名单内链接不计 link 分，但仍走完整规则与送审判断
+        domains = extract_domains(text)
+        if settings.get("domain_allowlist_enabled", True):
+            all_allowed, allowed_hits = allowlisted_domains(
+                text, settings.get("domain_allowlist") or []
+            )
+        else:
+            all_allowed, allowed_hits = False, set()
         evaluation = self.rules.evaluate(
             text,
             group_id=group_id,
@@ -939,7 +980,18 @@ class QQGroupManager(Star):
             recent_messages=recent,
             duplicate_senders=duplicate_senders,
             duplicate_members=int(settings.get("duplicate_flood_members", 3) or 3),
+            allowlisted=all_allowed,
         )
+        audit_rule_hits = [hit.to_dict() for hit in evaluation.hits]
+        if all_allowed and allowed_hits:
+            audit_rule_hits.append(
+                {"rule": "link_allowlist", "domains": sorted(allowed_hits)}
+            )
+            self.logger.info(
+                "域名白名单命中（只降权不豁免）：domains=%s 全部域名=%s",
+                sorted(allowed_hits),
+                sorted(domains),
+            )
         if send_images and "image" not in evaluation.signals:
             evaluation.signals["image"] = SCORE_RULES["image"]
             evaluation.score = min(100, evaluation.score + SCORE_RULES["image"])
@@ -960,6 +1012,22 @@ class QQGroupManager(Star):
                 source="rule",
             )
             hard_actions = list(hard_actions)
+        elif whitelisted:
+            # 命中误判白名单：跳过 LLM 送审，但规则分与审计照旧（verdict=allow 写库）
+            verdict = Verdict(
+                verdict="allow",
+                category="whitelisted",
+                severity=0,
+                confidence=1.0,
+                reason="命中申诉白名单",
+                suggested_action="none",
+                source="rule",
+            )
+            self.logger.info(
+                "命中申诉白名单，跳过 LLM 送审（score=%s 信号=%s）",
+                evaluation.score,
+                list(evaluation.signals),
+            )
         else:
             days = self._days_in_group(group_id, sender_openid)
             # 玩梗 / 讨论 / 引用语境且没有任何真实渠道 → 不送 LLM 复审。
@@ -1042,6 +1110,22 @@ class QQGroupManager(Star):
         if verdict is None:
             return
 
+        # 二维码承载文本（多模态模型填写）：命中引流特征时升级严重度并留痕，
+        # 但不覆盖模型的 verdict 判定本身（避免把"识别失败"当成违规）。
+        qr_reason = qr_risk_text(getattr(verdict, "qr_text", ""))
+        if qr_reason:
+            audit_rule_hits.append({"rule": "qr_content", "reason": qr_reason})
+            if verdict.verdict != "allow":
+                verdict.severity = max(int(verdict.severity or 1), 3)
+                if qr_reason not in (verdict.reason or ""):
+                    verdict.reason = (verdict.reason or "") + f"（{qr_reason}）"
+            self.logger.info(
+                "群 %s 消息 %s 的二维码内容命中引流特征：%s",
+                group_id,
+                msg_id,
+                qr_reason,
+            )
+
         async def _send(text_out: str) -> None:
             await event.send(MessageChain([Plain(text_out)]))
 
@@ -1055,8 +1139,8 @@ class QQGroupManager(Star):
             sender_name=sender_name,
             sender_role=sender_role,
             message_excerpt=text,
-            text_digest=digest_text(text),
-            rule_hits=[hit.to_dict() for hit in evaluation.hits],
+            text_digest=digest,
+            rule_hits=audit_rule_hits,
             hard_actions=hard_actions,
             source=verdict.source,
             umo=event.unified_msg_origin,
@@ -1107,10 +1191,34 @@ class QQGroupManager(Star):
 
     @staticmethod
     def _reply_message_id(event: AstrMessageEvent) -> str:
-        """取出被引用消息的 ID（用于「撤回」指令）。"""
-        for component in event.get_messages():
+        """取出被引用消息的 ID（用于「撤回」与「申诉」指令）。
+
+        QQ 官方适配器不同版本对引用消息的暴露形态不一致，这里按
+        Reply 组件 → message_obj.reply → message_obj.raw_message.reply 依次尝试；
+        全部取不到时返回空串，调用方回退到"最近一条被处置记录"。
+        """
+        try:
+            components = list(event.get_messages() or [])
+        except Exception:  # pragma: no cover - 兼容异常事件对象
+            components = []
+        for component in components:
             if isinstance(component, Reply):
                 return str(getattr(component, "id", "") or "")
+        message_obj = getattr(event, "message_obj", None)
+        for holder in (message_obj, getattr(message_obj, "raw_message", None)):
+            if holder is None:
+                continue
+            for attr in ("reply", "Reply"):
+                reply = getattr(holder, attr, None)
+                if reply is None:
+                    continue
+                value = (
+                    getattr(reply, "id", "")
+                    or getattr(reply, "message_id", "")
+                    or getattr(reply, "msg_id", "")
+                )
+                if value:
+                    return str(value)
         return ""
 
     def _resolve_target(
@@ -1152,6 +1260,13 @@ class QQGroupManager(Star):
             return [await self._cmd_group_info(group_id)]
         if name in STATUS_COMMANDS:
             return [await self._cmd_status(group_id, sender_openid, admin, group_admin)]
+        if name in GLOBAL_BLACKLIST_COMMANDS:
+            if not admin:
+                return ["仅 AstrBot 管理员可维护跨群黑名单。"]
+            return await self._cmd_global_blacklist(
+                event, group_id, name, args, sender_openid
+            )
+
         if name in SELFCHECK_COMMANDS:
             if not admin:
                 return ["仅 AstrBot 管理员可执行能力自检。"]
@@ -1184,6 +1299,10 @@ class QQGroupManager(Star):
             return await self._cmd_stats(args)
         if name in APPEAL_COMMANDS:
             return await self._cmd_appeal(event, group_id, args, sender_openid, sender_name)
+        if name in APPEAL_DECIDE_COMMANDS:
+            return await self._cmd_appeal_decide(
+                event, group_id, name, args, sender_openid
+            )
         if name in JOIN_MODE_COMMANDS:
             return await self._cmd_join_mode(group_id, args)
         if name in JOIN_LIST_COMMANDS:
@@ -1439,15 +1558,36 @@ class QQGroupManager(Star):
         sender_openid: str,
         sender_name: str,
     ) -> list[str]:
+        """成员申诉：优先用 Reply 关联被处置消息，取不到再回退「最近一条」。"""
         if self.audit is None:
             return ["审计库尚未就绪。"]
+        if not self.store.get_setting("appeal_enabled", True):
+            return ["当前未开启申诉功能，请联系管理员。"]
         reason = " ".join(args).strip()
         if not reason:
             return ["用法：申诉 <理由>（可回复被处置的消息）"]
-        row = await self.audit.find_last_event(group_id, sender_openid)
+        reply_id = self._reply_message_id(event)
+        row: dict[str, Any] | None = None
+        if reply_id:
+            row = await self.audit.find_event_by_msg_id(group_id, reply_id)
+            if row is None:
+                self.logger.info(
+                    "申诉 Reply 关联失败：msg_id=%s 未找到审核事件，回退最近一条"
+                    "（群=%s 成员=%s）",
+                    reply_id,
+                    mask_openid(group_id),
+                    mask_openid(sender_openid),
+                )
+        if row is None:
+            row = await self.audit.find_last_event(group_id, sender_openid)
         if row is None:
             return ["没有找到你近期被处置的记录。"]
-        await self.audit.mark_appeal(int(row.get("id") or 0), reason)
+        state = str(row.get("appeal_state") or "")
+        if state in ("accepted", "rejected"):
+            label = "通过" if state == "accepted" else "驳回"
+            return [f"该记录已处理（结果：{label}），如需复核请联系管理员。"]
+        event_id = int(row.get("id") or 0)
+        await self.audit.create_appeal(event_id, reason)
         await self._notify(
             "appeal",
             {
@@ -1456,11 +1596,174 @@ class QQGroupManager(Star):
                 "sender_name": sender_name,
                 "sender_openid": sender_openid,
                 "text": reason,
-                "event_id": row.get("id"),
+                "event_id": event_id,
+                "msg_id": row.get("msg_id") or "",
+                "excerpt": row.get("text_excerpt") or "",
             },
         )
-        del event
         return ["申诉已提交，管理员会复核这条记录。"]
+
+    async def _whitelist_from_event(self, event_row: dict[str, Any], by: str, note: str) -> bool:
+        """把申诉通过的消息摘要写入误判白名单（后续同内容跳过 LLM 送审）。"""
+        if self.audit is None:
+            return False
+        excerpt = str(event_row.get("text_excerpt") or "")
+        digest = str(event_row.get("text_digest") or "") or digest_text(excerpt)
+        skeleton, _hits = skeleton_text(excerpt, self.store.homoglyph() or None)
+        try:
+            await self.audit.whitelist_add(
+                digest, skeleton, note or "申诉通过自动加白", by
+            )
+        except Exception as exc:  # pragma: no cover - 加白失败不影响申诉结果
+            self.logger.warning("写入申诉白名单失败：%s", exc)
+            return False
+        self.logger.info("申诉通过自动加白：digest=%s skeleton=%s", digest, skeleton[:40])
+        return True
+
+    async def _apply_appeal_accept(
+        self,
+        event_row: dict[str, Any],
+        by: str,
+        note: str,
+        *,
+        send: Any = None,
+    ) -> dict[str, Any]:
+        """申诉通过后的补偿：解禁 + 追加动作留痕 + 回执（不删原事件）。"""
+        event_id = int(event_row.get("id") or 0)
+        group_id = str(event_row.get("group_id") or "")
+        openid = str(event_row.get("sender_openid") or "")
+        result: dict[str, Any] = {
+            "event_id": event_id,
+            "unmuted": False,
+            "dry_run": False,
+            "whitelisted": False,
+            "notified": False,
+        }
+        has_mute = False
+        if self.audit is not None and event_id:
+            finder = getattr(self.audit, "event_has_action", None)
+            if callable(finder):
+                try:
+                    has_mute = bool(await finder(event_id, "mute"))
+                except Exception as exc:
+                    self.logger.warning("查询处置动作失败：%s", exc)
+            if not has_mute and group_id and openid:
+                try:
+                    rows = await self.audit.list_mutes(group_id, active_only=True)
+                except Exception:
+                    rows = []
+                has_mute = any(
+                    str(item.get("member_openid") or "") == openid for item in rows
+                )
+        if has_mute and group_id and openid and self.api is not None:
+            try:
+                response = await self.api.unmute_member(group_id, openid, caller="appeal")
+                result["unmuted"] = True
+                result["dry_run"] = bool(response.get("_dry_run"))
+            except QQApiError as exc:
+                result["unmute_error"] = exc.hint or exc.message
+                self.logger.warning("申诉解禁失败：%s", exc)
+            except Exception as exc:  # pragma: no cover
+                result["unmute_error"] = str(exc)
+                self.logger.warning("申诉解禁异常：%s", exc)
+            if self.audit is not None:
+                try:
+                    await self.audit.set_mute_active(group_id, openid, False)
+                except Exception as exc:  # pragma: no cover
+                    self.logger.warning("更新禁言台账失败：%s", exc)
+        if self.audit is not None and event_id:
+            self.audit.record_action(
+                event_id=event_id,
+                group_id=group_id,
+                action="appeal_accepted",
+                target_openid=openid,
+                ok=True,
+                detail=safe_json_dumps(
+                    {"by": by, "note": note, "unmuted": result["unmuted"]}
+                ),
+            )
+        if self.store.get_setting("appeal_auto_whitelist"):
+            result["whitelisted"] = await self._whitelist_from_event(event_row, by, note)
+        notify_payload = {
+            "group_id": group_id,
+            "group_name": event_row.get("group_name")
+            or self.store.group_or_default(group_id).name,
+            "sender_name": event_row.get("sender_name") or "",
+            "sender_openid": openid,
+            "text": note,
+            "event_id": event_id,
+            "accepted": True,
+            "unmuted": result["unmuted"],
+        }
+        if self.store.get_setting("appeal_notify", True):
+            await self._notify("appeal_result", notify_payload)
+            result["notified"] = True
+            if send is not None:
+                try:
+                    tail = "，禁言已解除。" if result["unmuted"] else "。"
+                    await send("你的申诉已通过" + tail)
+                except Exception as exc:  # pragma: no cover
+                    self.logger.warning("群内申诉回执发送失败：%s", exc)
+        else:
+            self.logger.info("[申诉通过] event=%s by=%s note=%s", event_id, by, note)
+        return result
+
+    async def _cmd_appeal_decide(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        name: str,
+        args: list[str],
+        sender_openid: str,
+    ) -> list[str]:
+        """群管处理申诉：回复申诉消息后发送「申诉通过 / 申诉驳回 [理由]」。"""
+        if self.audit is None:
+            return ["审计库尚未就绪。"]
+        accepted = name == APPEAL_DECIDE_COMMANDS[0]
+        note = " ".join(args).strip()
+        reply_id = self._reply_message_id(event)
+        row: dict[str, Any] | None = None
+        if reply_id:
+            row = await self.audit.find_event_by_msg_id(group_id, reply_id)
+        if row is None:
+            pending = await self.audit.list_appeals(
+                state="pending", group_id=group_id, limit=1
+            )
+            row = pending[0] if pending else None
+        if row is None:
+            return ["没有找到待处理的申诉：请回复申诉消息后重试。"]
+        event_id = int(row.get("id") or 0)
+        by = f"qq:{sender_openid}"
+        ok = await self.audit.resolve_appeal(event_id, accepted=accepted, by=by, note=note)
+        if not ok:
+            return ["申诉处理失败，请稍后重试。"]
+        if accepted:
+
+            async def _send(text_out: str) -> None:
+                target = str(row.get("sender_openid") or "")
+                chain = MessageChain(
+                    [At(qq=target), Plain(" " + text_out)] if target else [Plain(text_out)]
+                )
+                await event.send(chain)
+
+            result = await self._apply_appeal_accept(row, by, note, send=_send)
+            suffix = "，禁言已解除" if result.get("unmuted") else ""
+            return [f"已通过该申诉{suffix}。"]
+        if self.store.get_setting("appeal_notify", True):
+            await self._notify(
+                "appeal_result",
+                {
+                    "group_id": group_id,
+                    "group_name": row.get("group_name")
+                    or self.store.group_or_default(group_id).name,
+                    "sender_name": row.get("sender_name") or "",
+                    "sender_openid": row.get("sender_openid") or "",
+                    "text": note,
+                    "event_id": event_id,
+                    "accepted": False,
+                },
+            )
+        return ["已驳回该申诉。"]
 
     async def _cmd_join_mode(self, group_id: str, args: list[str]) -> list[str]:
         if not args:
@@ -1672,14 +1975,26 @@ class QQGroupManager(Star):
     async def test_rules(self, text: str, group_id: str = "") -> dict[str, Any]:
         """规则命中测试（WebUI 关键词视图用）。"""
         settings = self.store.settings()
+        raw_text = text or ""
+        domains = extract_domains(raw_text)
+        if settings.get("domain_allowlist_enabled", True):
+            all_allowed, allowed_hits = allowlisted_domains(
+                raw_text, settings.get("domain_allowlist") or []
+            )
+        else:
+            all_allowed, allowed_hits = False, set()
         evaluation = self.rules.evaluate(
-            text or "",
+            raw_text,
             group_id=group_id,
             flood_threshold=int(settings.get("flood_threshold", 8) or 8),
             duplicate_members=int(settings.get("duplicate_flood_members", 3) or 3),
+            allowlisted=all_allowed,
         )
         return {
             "hits": [hit.to_dict() for hit in evaluation.hits],
+            "domains": sorted(domains),
+            "allowlisted": all_allowed,
+            "allowlist_hits": sorted(allowed_hits),
             "hard_actions": evaluation.hard_actions,
             "enforce_actions": evaluation.enforce_actions,
             "summary": evaluation.summary(),
@@ -1929,6 +2244,196 @@ class QQGroupManager(Star):
             by=by,
         )
 
+    # ------------------------------------------------------------------
+    # 跨群黑名单（B5，仅 AstrBot 管理员）
+    # ------------------------------------------------------------------
+    async def _cmd_global_blacklist(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        name: str,
+        args: list[str],
+        sender_openid: str,
+    ) -> list[str]:
+        """`全局拉黑 @某人 <理由>` / `全局解除 @某人` / `全局拉黑`（查看列表）。"""
+        target, member_name = self._resolve_target(event, group_id, args)
+        if name == GLOBAL_BLACKLIST_COMMANDS[1]:          # 全局解除
+            if not target:
+                return ["用法：全局解除 @某人"]
+            removed = await self.store.remove_global_blacklist(target)
+            self.audit.record_api_call(
+                group_id=group_id,
+                method="global_blacklist_remove",
+                path="command",
+                ok=True,
+                caller="command",
+            )
+            self.logger.info(
+                "跨群黑名单移除：%s（by=%s）",
+                mask_openid(target),
+                mask_openid(sender_openid),
+            )
+            return ["已解除跨群黑名单。" if removed else "该成员不在跨群黑名单里。"]
+        # 全局拉黑
+        if not target:
+            entries = self.store.global_blacklist()
+            if not entries:
+                return ["跨群黑名单为空。用法：全局拉黑 @某人 <理由>"]
+            lines = ["🚫 跨群黑名单（对全插件生效）"]
+            for openid, entry in sorted(entries.items()):
+                reason = str(entry.get("reason") or "")
+                lines.append(
+                    f"• {mask_openid(openid)}"
+                    + (f" —— {reason}" if reason else "")
+                )
+            return lines
+        reason = " ".join(
+            token
+            for token in args
+            if not token.strip().startswith("@")
+            and token.strip() not in {target, member_name}
+        ).strip()
+        await self.store.add_global_blacklist(
+            target, reason=reason, added_by=f"qq:{sender_openid}"
+        )
+        self.audit.record_api_call(
+            group_id=group_id,
+            method="global_blacklist_add",
+            path="command",
+            ok=True,
+            caller="command",
+        )
+        self.logger.info(
+            "跨群黑名单新增：%s（by=%s，理由=%s）",
+            mask_openid(target),
+            mask_openid(sender_openid),
+            reason or "未填写",
+        )
+        return [f"已加入跨群黑名单：{mask_openid(target)}（该成员在任意群的入群申请都会被拒绝）"]
+
+    def global_blacklist_snapshot(self) -> dict[str, Any]:
+        """管理台用：跨群黑名单快照。"""
+        entries = self.store.global_blacklist()
+        return {
+            "ok": True,
+            "entries": [
+                {
+                    "openid": openid,
+                    "masked": mask_openid(openid),
+                    "reason": str(entry.get("reason") or ""),
+                    "added_by": str(entry.get("added_by") or ""),
+                    "added_at": float(entry.get("added_at") or 0),
+                }
+                for openid, entry in sorted(entries.items())
+            ],
+        }
+
+    async def global_blacklist_update(
+        self, *, op: str, openid: str, reason: str = "", by: str = ""
+    ) -> dict[str, Any]:
+        """管理台用：新增/移除跨群黑名单。"""
+        target = str(openid or "").strip()
+        if not target:
+            return {"ok": False, "error": "缺少 openid"}
+        if op == "remove":
+            removed = await self.store.remove_global_blacklist(target)
+            return {"ok": True, "removed": removed}
+        if op != "add":
+            return {"ok": False, "error": "op 只能是 add 或 remove"}
+        await self.store.add_global_blacklist(target, reason=reason, added_by=by)
+        self.audit.record_api_call(
+            group_id="",
+            method="global_blacklist_add",
+            path="webui",
+            ok=True,
+            caller="webui",
+        )
+        return {"ok": True}
+
+    async def appeals_snapshot(
+        self, *, state: str = "pending", group_id: str = "", days: int = 30, limit: int = 100
+    ) -> dict[str, Any]:
+        """申诉列表（管理台「申诉」视图）。"""
+        if self.audit is None:
+            return {"items": [], "total": 0, "state": state}
+        items = await self.audit.list_appeals(
+            state=state, group_id=group_id, days=days, limit=limit
+        )
+        for item in items:
+            gid = str(item.get("group_id") or "")
+            if not item.get("group_name") and gid:
+                item["group_name"] = self.store.group_or_default(gid).name
+        return {"items": items, "total": len(items), "state": state, "days": days}
+
+    async def appeal_decide(
+        self,
+        event_id: int,
+        *,
+        accepted: bool,
+        note: str = "",
+        by: str = "webui",
+    ) -> dict[str, Any]:
+        """处理申诉（管理台与群管指令共用）：写状态 + 补偿 + 回执。"""
+        if self.audit is None:
+            return {"ok": False, "message": "审计库尚未就绪"}
+        row = await self.audit.get_event(int(event_id))
+        if row is None:
+            return {"ok": False, "message": "申诉对应的审核事件不存在"}
+        ok = await self.audit.resolve_appeal(
+            int(event_id), accepted=accepted, by=by, note=note
+        )
+        if not ok:
+            return {"ok": False, "message": "写入申诉结果失败"}
+        result: dict[str, Any] = {
+            "ok": True,
+            "event_id": int(event_id),
+            "state": "accepted" if accepted else "rejected",
+        }
+        if accepted:
+            result.update(await self._apply_appeal_accept(row, by, note))
+        elif self.store.get_setting("appeal_notify", True):
+            await self._notify(
+                "appeal_result",
+                {
+                    "group_id": row.get("group_id") or "",
+                    "group_name": row.get("group_name")
+                    or self.store.group_or_default(str(row.get("group_id") or "")).name,
+                    "sender_name": row.get("sender_name") or "",
+                    "sender_openid": row.get("sender_openid") or "",
+                    "text": note,
+                    "event_id": int(event_id),
+                    "accepted": False,
+                },
+            )
+        return result
+
+    async def appeal_whitelist_snapshot(self) -> dict[str, Any]:
+        """误判自学习白名单列表。"""
+        if self.audit is None:
+            return {"items": []}
+        return {"items": await self.audit.whitelist_list()}
+
+    async def appeal_whitelist_update(
+        self, *, op: str, digest: str, by: str = "webui", reason: str = ""
+    ) -> dict[str, Any]:
+        """白名单增删（管理台「规则增强」页）。"""
+        if self.audit is None:
+            return {"ok": False, "message": "审计库尚未就绪"}
+        if op == "del":
+            removed = await self.audit.whitelist_remove(digest)
+            return {
+                "ok": bool(removed),
+                "message": "已撤销该白名单条目" if removed else "未找到该白名单条目",
+            }
+        if op == "add":
+            if not digest:
+                return {"ok": False, "message": "缺少 digest"}
+            await self.audit.whitelist_add(
+                digest, "", reason or "管理台手动加白", by
+            )
+            return {"ok": True}
+        return {"ok": False, "message": f"未知操作：{op}"}
+
     async def policy_snapshot(self, *, force: bool = False) -> dict[str, Any]:
         """官方入群自动审批策略列表 + 冲突信息。"""
         error = ""
@@ -1989,7 +2494,13 @@ class QQGroupManager(Star):
         if not text.strip():
             return {"ok": False, "message": "缺少待测文本"}
         group_config = self.store.group_or_default(group_id)
-        evaluation = self.rules.evaluate(text, group_id=group_id)
+        if settings.get("domain_allowlist_enabled", True):
+            all_allowed, _allowed_hits = allowlisted_domains(
+                text, settings.get("domain_allowlist") or []
+            )
+        else:
+            all_allowed = False
+        evaluation = self.rules.evaluate(text, group_id=group_id, allowlisted=all_allowed)
         hard_actions = evaluation.hard_actions
         steps: list[dict[str, Any]] = [
             {
