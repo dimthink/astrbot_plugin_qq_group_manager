@@ -43,6 +43,8 @@
 - **新增配置项**：`domain_allowlist_enabled`（默认开）、`domain_allowlist`（内置竞赛域名）、
   `appeal_enabled`（默认开）、`appeal_auto_whitelist`（默认关）、`appeal_notify`（默认开）。
 - 新增 `summary_by_category(days)` / `summary_by_group(days)` 聚合，为后续审核周报做准备。
+- **插件介绍接入**：根目录提供 `intro.md`，可被「菜单导航」插件的 `插件介绍` 指令聚合展示
+  （含入群申请轮询、禁言对账、能力探测这类无需指令的主动行为）。
 
 ### ⚙️ 变更
 - `main.py` 的 `VERSION` 与 `metadata.yaml` 统一为 `0.9.0`（此前分别为 `0.5.0` / `0.8.0`）。
