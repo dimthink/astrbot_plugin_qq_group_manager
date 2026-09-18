@@ -462,7 +462,14 @@ def test_appeal_web_routes_registered():
     prefix = "/" + PLUGIN_ROOT.name + "/"
     for expected in ("appeals", "appeals/decide", "appeal_whitelist"):
         assert prefix + expected in paths, expected
-    assert main.VERSION == "0.9.0"
+    # 版本号必须与 metadata.yaml 一致（避免两处各写各的，改版时漏一处）
+    metadata = (PLUGIN_ROOT / "metadata.yaml").read_text(encoding="utf-8")
+    declared = next(
+        line.split(":", 1)[1].strip()
+        for line in metadata.splitlines()
+        if line.startswith("version:")
+    )
+    assert main.VERSION == declared
 
 
 # 13. summary_by_category / summary_by_group（B2 周报聚合基础）
