@@ -8,7 +8,7 @@ desc: |
   全部能力带平台权限探测、受限留痕与优雅降级。
 version: 0.9.1
 author: td1336065617
-repo: https://github.com/td1336065617/astrbot_plugin_qq_group_manager
+repo: https://github.com/dimthink/astrbot_plugin_qq_group_manager
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - qq_official
