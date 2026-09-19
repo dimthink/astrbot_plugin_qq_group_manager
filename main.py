@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -116,6 +117,9 @@ class QQGroupManager(Star):
 
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context, config)
+        if not getattr(self, "logger", None):
+            # AstrBot < 4.27 不给 Star 注入实例级 logger，只有模块级的。
+            self.logger = logging.getLogger("astrbot")
         self.store = PluginStore(AstrBotKVBackend(self), logger=self.logger)
         self.bus = EventBus()
         self.scheduler = TaskScheduler(logger=self.logger)
